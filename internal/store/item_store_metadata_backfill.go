@@ -122,8 +122,12 @@ func (s *ItemStore) MetadataBackfill(ctx context.Context, parentID dto.UUID, des
 // before any write transaction opens. It loads the stored rows for all desired
 // item IDs and virtual IDs in one read-only query. Each desired item must exist
 // in the store and must not change Kind, ParentID, or Path. Each stored virtual
-// must not change Kind or Path. An absent virtual is legal because the virtual
-// transaction inserts it. Any failure returns an error before the virtual
+// must not change Kind. A virtual (Person, Studio, Genre) keeps its stored
+// Path: its ID comes from the lowercased name, so a credit whose name differs
+// only in case from the stored name has the same ID and a different literal
+// path. Upstream LibraryManager.GetItemByName returns the stored item for that
+// ID and does not compare the path. An absent virtual is legal because the
+// virtual transaction inserts it. Any failure returns an error before the virtual
 // transaction or any item transaction starts, so no row is committed.
 func (s *ItemStore) validateBackfillStructure(ctx context.Context, desired, virtuals []item.Item) error {
 	ids := make([]dto.UUID, 0, len(desired)+len(virtuals))
@@ -155,8 +159,8 @@ func (s *ItemStore) validateBackfillStructure(ctx context.Context, desired, virt
 		if !found {
 			continue
 		}
-		if err := rejectStructuralChange(virtual, row); err != nil {
-			return err
+		if row.Kind != virtual.Kind {
+			return fmt.Errorf("metadata backfill: virtual item %s kind mismatch: stored %s, desired %s — the backfill is enrichment-only", virtual.ID, row.Kind, virtual.Kind)
 		}
 	}
 	return nil

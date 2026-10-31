@@ -84,6 +84,26 @@ v0.3.0 is the first public alpha of Deadfin.
   item keeps its stored metadata, the scan logs one `remote metadata provider
   failed` warning, and the folder stays `ok`. A cancelled scan still stops
   (D-107, #749; regression of #367).
+- A music album carries the artists of its songs, as upstream does:
+  `AlbumArtist`, `AlbumArtists`, `Artists` and `ArtistItems`. The album
+  artists of most songs come first. Before, no album had an album artist, so
+  clients showed none on album tiles (#739). An album scanned before this
+  change gets its artists on the next library scan (D-110). A locked album
+  keeps its values.
+- *Refresh Metadata* saves provider IDs and images for every library root
+  again. A cast member, studio, or genre whose name differs only in case from
+  the stored one (`Starz` and `STARZ`) has the same item ID but a different
+  path, and the refresh failed the whole folder with `path mismatch`; for a
+  library root, nothing was saved. The refresh now keeps the stored person,
+  studio, or genre path, as upstream does. A stale row of a removed
+  case-variant folder no longer fails its surviving sibling with
+  `parent mismatch`: the refresh moves it under the scanned folder, as an
+  ordinary scan does (#748).
+- A music track whose file carries an embedded cover (an attached picture,
+  as FLAC and MP3 files often do) gets that cover as its Primary image, and
+  an album without a cover file takes the Primary image of its first track.
+  Before, the embedded cover was never extracted, so an album without a
+  `folder.jpg` had no image (#784, D-108).
 - A library scan follows symbolic links, as upstream does. A linked media
   file or a linked directory, also one outside the library root, enters the
   library under the link path; before, the scan left every link out. A
@@ -91,6 +111,12 @@ v0.3.0 is the first public alpha of Deadfin.
   that holds it or to one of its ancestors is skipped with a warning (D-86).
   A file link's snapshot now carries the facts of its target, so playback and
   probing check the target file.
+- Every artist named in an `ARTIST` or `album_artist` tag gets a MusicArtist
+  item after a library scan, as upstream `ArtistsValidator` does. Before,
+  only artist folders made artists, so `/Artists` and `/Artists/AlbumArtists`
+  left out featured artists and album artists without a folder (#739). An
+  artist folder serves its own name. An artist that no track names any more
+  is deleted on the next scan, unless it is locked.
 - The library scan logs a folder failure when the folder fails. Before, the
   `scanner folder` lines came only after the whole scan ended, so a scan that
   stalled logged no failure at all (#702).

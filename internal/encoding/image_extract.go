@@ -41,6 +41,9 @@ type ImageExtraction struct {
 	Video3D     Image3DFormat
 	// UseIFrame is true for the first attempt and false for the fallback.
 	UseIFrame bool
+	// Audio marks an embedded audio image (MediaEncoder.ExtractAudioImage):
+	// one standard attempt without the -s resolution.
+	Audio bool
 	// PerfTradeoff is the FFmpeg:imgExtractPerfTradeoff setting.
 	PerfTradeoff bool
 	// Resolution is the -s value from ChapterImageResolution, or empty.
@@ -121,7 +124,7 @@ func ImageExtractionArgs(job ImageExtraction) []string {
 		args = append(args, "-map", "0:"+strconv.Itoa(*job.StreamIndex))
 	}
 	args = append(args, "-threads", strconv.Itoa(job.Threads), "-v", "quiet", "-vframes", "1", "-vf", strings.Join(filters, ","))
-	if job.Resolution != "" {
+	if job.Resolution != "" && !job.Audio {
 		args = append(args, "-s", job.Resolution)
 	}
 	// EncodingHelper.GetVideoSyncOption("-1", EncoderVersion).

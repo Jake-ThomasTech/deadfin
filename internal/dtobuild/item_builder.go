@@ -489,18 +489,12 @@ func projectCore(value item.Item, enrichment Enrichment, options store.ItemQuery
 	case item.KindSeason:
 		result.SeriesID = value.SeriesID
 	}
-	if value.Kind == item.KindAudio {
-		result.HasLyrics = boolPointer(false)
-		result.Album = dereference(value.Album)
-		if enrichment.Album != "" {
-			result.Album = enrichment.Album
-		}
+	if hasArtistValues(value.Kind) {
 		result.Artists = stringsOrEmpty(value.Values.Artists)
 		result.ArtistItems = enrichment.ArtistItems
 		if result.ArtistItems == nil {
 			result.ArtistItems = []dto.NameGuidPair{}
 		}
-		result.AlbumID = enrichment.AlbumID
 		result.AlbumArtists = enrichment.AlbumArtists
 		if result.AlbumArtists == nil {
 			result.AlbumArtists = []dto.NameGuidPair{}
@@ -508,6 +502,14 @@ func projectCore(value item.Item, enrichment Enrichment, options store.ItemQuery
 		if len(value.Values.AlbumArtists) != 0 {
 			result.AlbumArtist = value.Values.AlbumArtists[0]
 		}
+	}
+	if value.Kind == item.KindAudio {
+		result.HasLyrics = boolPointer(false)
+		result.Album = dereference(value.Album)
+		if enrichment.Album != "" {
+			result.Album = enrichment.Album
+		}
+		result.AlbumID = enrichment.AlbumID
 		if result.PremiereDate == nil {
 			result.PremiereDate = dto.NewItemPremiereDate(time.Time{}, true)
 		}

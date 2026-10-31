@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ import (
 const (
 	ScreenGrabberName          = "Screen Grabber"
 	EmbeddedImageExtractorName = "Embedded Image Extractor"
+	AudioImageExtractorName    = "Image Extractor"
 )
 
 const dynamicMetadataPathToken = "%MetadataPath%"
@@ -65,10 +67,11 @@ type DynamicImagesOptions struct {
 	Logger   *slog.Logger
 }
 
-// DynamicImages runs upstream's IDynamicImageProvider pass for videos:
+// DynamicImages runs upstream's IDynamicImageProvider pass: for videos,
 // EmbeddedImageProvider ("Embedded Image Extractor", order 99) and
-// VideoImageProvider ("Screen Grabber", order 100). It implements
-// library.DynamicImageRefresher.
+// VideoImageProvider ("Screen Grabber", order 100); for audio,
+// AudioImageProvider ("Image Extractor"). It implements
+// library.DynamicImageRefresher and library.FolderImageCopier.
 type DynamicImages struct {
 	options   DynamicImagesOptions
 	providers []dynamicImageProvider
@@ -77,7 +80,7 @@ type DynamicImages struct {
 // NewDynamicImages returns the dynamic image providers in upstream default
 // order.
 func NewDynamicImages(options DynamicImagesOptions) *DynamicImages {
-	return &DynamicImages{options: options, providers: []dynamicImageProvider{embeddedImageExtractor{}, screenGrabber{}}}
+	return &DynamicImages{options: options, providers: []dynamicImageProvider{audioImageExtractor{}, embeddedImageExtractor{}, screenGrabber{}}}
 }
 
 // ImageFetchers lists the dynamic image providers for kind in default order,
@@ -90,11 +93,11 @@ func (d *DynamicImages) ImageFetchers(kind item.Kind) []ImageFetcherInfo {
 	// GetPluginSummary asks about a file-backed dummy item of the kind.
 	path := "dummy"
 	dummy := item.Item{Kind: kind, Path: &path}
-	if !supportsDynamicImages(dummy) {
-		return nil
-	}
-	fetchers := make([]ImageFetcherInfo, 0, len(d.providers))
+	var fetchers []ImageFetcherInfo
 	for _, provider := range d.providers {
+		if !provider.Supports(dummy) {
+			continue
+		}
 		fetchers = append(fetchers, ImageFetcherInfo{Name: provider.Name(), SupportedImages: provider.SupportedImages(dummy)})
 	}
 	return fetchers
@@ -104,6 +107,7 @@ func (d *DynamicImages) ImageFetchers(kind item.Kind) []ImageFetcherInfo {
 type dynamicImageProvider interface {
 	Name() string
 	Order() int
+	Supports(item.Item) bool
 	SupportedImages(item.Item) []item.ImageType
 	// Plan returns the extraction for imageType, or false when the provider
 	// has no image (DynamicImageResponse.HasImage == false).
@@ -127,7 +131,7 @@ func (d *DynamicImages) RefreshDynamicImages(ctx context.Context, input library.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !supportsDynamicImages(*target) {
+	if !d.supports(*target) {
 		return nil
 	}
 	// ProviderManager.CanRefreshImages: a locked item refreshes remote and
@@ -151,7 +155,7 @@ func (d *DynamicImages) RefreshDynamicImages(ctx context.Context, input library.
 			}
 		}
 	}
-	for _, provider := range d.enabledProviders(input.Options, target.Kind, settings) {
+	for _, provider := range d.enabledProviders(input.Options, *target, settings) {
 		if err := d.refreshFromProvider(ctx, provider, input, target, settings, replacing, downloaded); err != nil {
 			return err
 		}
@@ -162,15 +166,15 @@ func (d *DynamicImages) RefreshDynamicImages(ctx context.Context, input library.
 // enabledProviders ports GetImageProvidersInternal: the enabled providers in
 // ImageFetcherOrder, then in default order. TypeOptions.ImageFetcherOrder
 // wins over the server order when the library has an entry for the type.
-func (d *DynamicImages) enabledProviders(options library.LibraryOptions, kind item.Kind, settings DynamicImageSettings) []dynamicImageProvider {
-	typeOptions := options.TypeOptionsFor(kind)
+func (d *DynamicImages) enabledProviders(options library.LibraryOptions, target item.Item, settings DynamicImageSettings) []dynamicImageProvider {
+	typeOptions := options.TypeOptionsFor(target.Kind)
 	order := settings.ImageFetcherOrder
 	if typeOptions != nil {
 		order = typeOptions.ImageFetcherOrder
 	}
 	enabled := make([]dynamicImageProvider, 0, len(d.providers))
 	for _, provider := range d.providers {
-		if imageFetcherEnabled(typeOptions, settings.DisabledImageFetchers, provider.Name()) {
+		if provider.Supports(target) && imageFetcherEnabled(typeOptions, settings.DisabledImageFetchers, provider.Name()) {
 			enabled = append(enabled, provider)
 		}
 	}
@@ -227,8 +231,7 @@ func (d *DynamicImages) refreshFromProvider(ctx context.Context, provider dynami
 }
 
 // extractAndSave runs one extraction into the item's internal metadata
-// directory and records it as the item's image. Images save there with a
-// content tag in the file name, as uploads do (D-44).
+// directory and records it as the item's image.
 func (d *DynamicImages) extractAndSave(ctx context.Context, plan dynamicImagePlan, target *item.Item, imageType item.ImageType, settings DynamicImageSettings) error {
 	if target.Path == nil {
 		return errors.New("item has no path")
@@ -238,13 +241,56 @@ func (d *DynamicImages) extractAndSave(ctx context.Context, plan dynamicImagePla
 		return fmt.Errorf("open media source: %w", err)
 	}
 	defer func() { _ = source.Close() }()
+	return d.saveImage(target, imageType, plan.extension, func(temporaryPath string) error {
+		job := mergeExtractionSettings(plan.job, settings.Extraction)
+		job.OutputPath = temporaryPath
+		return d.options.Extractor.Extract(ctx, job, source, settings.Timeout)
+	})
+}
 
+// CopyFolderImage ports BaseDynamicImageProvider.CreateSingleImage and
+// FetchToFileInternal for one image type: it copies the local image of
+// source into the internal metadata directory of target and records it as
+// the image of target. It reports false when source has no local image of
+// the type with a file extension.
+func (d *DynamicImages) CopyFolderImage(ctx context.Context, source item.Item, target *item.Item, imageType item.ImageType) (bool, error) {
+	if d == nil || target == nil || d.options.MetadataPath == "" {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	position := imagePositionOf(source.ImageInfos, imageType, 0)
+	if position < 0 {
+		return false, nil
+	}
+	path := source.ImageInfos[position].Path
+	if path == "" || isRemoteImagePath(path) || filepath.Ext(path) == "" {
+		return false, nil
+	}
+	if rest, found := strings.CutPrefix(path, dynamicMetadataPathToken+"/"); found {
+		path = filepath.Join(d.options.MetadataPath, filepath.FromSlash(rest))
+	}
+	err := d.saveImage(target, imageType, strings.ToLower(filepath.Ext(path)), func(temporaryPath string) error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(temporaryPath, data, 0o644)
+	})
+	return err == nil, err
+}
+
+// saveImage writes one image through write into the item's internal
+// metadata directory and records it as the item's image. Images save there
+// with a content tag in the file name, as uploads do (D-44).
+func (d *DynamicImages) saveImage(target *item.Item, imageType item.ImageType, extension string, write func(temporaryPath string) error) error {
 	relativeDirectory := internalMetadataRelative(target.ID)
 	directory := filepath.Join(d.options.MetadataPath, relativeDirectory)
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(directory, ".extract-*"+plan.extension)
+	temporary, err := os.CreateTemp(directory, ".extract-*"+extension)
 	if err != nil {
 		return err
 	}
@@ -252,9 +298,7 @@ func (d *DynamicImages) extractAndSave(ctx context.Context, plan dynamicImagePla
 	_ = temporary.Close()
 	defer func() { _ = os.Remove(temporaryPath) }()
 
-	job := mergeExtractionSettings(plan.job, settings.Extraction)
-	job.OutputPath = temporaryPath
-	if err := d.options.Extractor.Extract(ctx, job, source, settings.Timeout); err != nil {
+	if err := write(temporaryPath); err != nil {
 		return err
 	}
 	data, err := os.ReadFile(temporaryPath)
@@ -269,7 +313,7 @@ func (d *DynamicImages) extractAndSave(ctx context.Context, plan dynamicImagePla
 		index = len(imagesOfType(target.ImageInfos, imageType))
 	}
 	position := imagePositionOf(target.ImageInfos, imageType, index)
-	name := dynamicImageSaveName(target.Kind, imageType, index) + "-" + hex.EncodeToString(sum[:4]) + plan.extension
+	name := dynamicImageSaveName(target.Kind, imageType, index) + "-" + hex.EncodeToString(sum[:4]) + extension
 	absolute := filepath.Join(directory, name)
 	if err := os.Chmod(temporaryPath, 0o644); err != nil {
 		return err
@@ -324,16 +368,32 @@ func mergeExtractionSettings(job, settings encoding.ImageExtraction) encoding.Im
 	return job
 }
 
-// supportsDynamicImages ports VideoImageProvider.Supports and
+// supports reports whether any dynamic image provider supports target.
+func (d *DynamicImages) supports(target item.Item) bool {
+	for _, provider := range d.providers {
+		if provider.Supports(target) {
+			return true
+		}
+	}
+	return false
+}
+
+// supportsVideoImages ports VideoImageProvider.Supports and
 // EmbeddedImageProvider.Supports: a complete, non-placeholder Video on the
 // file protocol that is not a shortcut. Library videos are never shortcuts in
 // Deadfin, and a virtual item has no file.
-func supportsDynamicImages(target item.Item) bool {
+func supportsVideoImages(target item.Item) bool {
 	switch target.Kind {
 	case item.KindMovie, item.KindEpisode, item.KindVideo, item.KindMusicVideo, item.KindTrailer:
 	default:
 		return false
 	}
+	return isLocalFileItem(target)
+}
+
+// isLocalFileItem reports a non-virtual, non-folder item with a file on the
+// file protocol (BaseItem.IsFileProtocol).
+func isLocalFileItem(target item.Item) bool {
 	if target.IsPlaceHolder || target.IsVirtualItem || target.IsFolder || target.Path == nil || *target.Path == "" {
 		return false
 	}
@@ -353,6 +413,8 @@ func (screenGrabber) Name() string { return ScreenGrabberName }
 
 // Order is 100: after internet image providers.
 func (screenGrabber) Order() int { return 100 }
+
+func (screenGrabber) Supports(target item.Item) bool { return supportsVideoImages(target) }
 
 func (screenGrabber) SupportedImages(item.Item) []item.ImageType {
 	return []item.ImageType{item.ImageTypePrimary}
@@ -395,6 +457,8 @@ func (embeddedImageExtractor) Name() string { return EmbeddedImageExtractorName 
 
 // Order is 99: after internet image providers, before the Screen Grabber.
 func (embeddedImageExtractor) Order() int { return 99 }
+
+func (embeddedImageExtractor) Supports(target item.Item) bool { return supportsVideoImages(target) }
 
 func (embeddedImageExtractor) SupportedImages(target item.Item) []item.ImageType {
 	if target.Kind == item.KindEpisode {
@@ -467,6 +531,53 @@ func (embeddedImageExtractor) Plan(target item.Item, imageType item.ImageType, s
 	job := encoding.ImageExtraction{Container: container, StreamIndex: &index}
 	applyStreamFacts(&job, selected)
 	return dynamicImagePlan{job: job, extension: codecImageExtension(selected.Codec)}, true
+}
+
+// audioImageExtractor ports AudioImageProvider. It has no IHasOrder, so its
+// order is 0.
+type audioImageExtractor struct{}
+
+func (audioImageExtractor) Name() string { return AudioImageExtractorName }
+
+func (audioImageExtractor) Order() int { return 0 }
+
+// Supports ports AudioImageProvider.Supports: an Audio item (AudioBook
+// derives from Audio upstream) on the file protocol.
+func (audioImageExtractor) Supports(target item.Item) bool {
+	if target.Kind != item.KindAudio && target.Kind != item.KindAudioBook {
+		return false
+	}
+	return isLocalFileItem(target)
+}
+
+func (audioImageExtractor) SupportedImages(item.Item) []item.ImageType {
+	return []item.ImageType{item.ImageTypePrimary}
+}
+
+// Plan ports AudioImageProvider.GetImage: the first EmbeddedImage stream
+// whose comment contains "front", then "cover", then the first one. Upstream
+// MediaEncoder.ExtractAudioImage always writes a JPEG.
+func (audioImageExtractor) Plan(_ item.Item, _ item.ImageType, streams []playback.MediaStream, _ []playback.MediaAttachment) (dynamicImagePlan, bool) {
+	var images []playback.MediaStream
+	for _, stream := range streams {
+		if stream.Type == playback.StreamTypeEmbeddedImage {
+			images = append(images, stream)
+		}
+	}
+	if len(images) == 0 {
+		return dynamicImagePlan{}, false
+	}
+	selected := images[0]
+	for _, word := range []string{"front", "cover"} {
+		if index := slices.IndexFunc(images, func(stream playback.MediaStream) bool {
+			return stream.Comment != nil && containsAnyFold(*stream.Comment, []string{word})
+		}); index >= 0 {
+			selected = images[index]
+			break
+		}
+	}
+	index := selected.Index
+	return dynamicImagePlan{job: encoding.ImageExtraction{StreamIndex: &index, Audio: true}, extension: ".jpg"}, true
 }
 
 // applyStreamFacts copies the stream facts ExtractImageInternal reads.

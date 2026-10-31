@@ -37,6 +37,12 @@ func TestImageExtractionArgs(t *testing.T) {
 				"-vf", "scale=round(iw*sar/2)*2:round(ih/2)*2", "-fps_mode", "auto", "-f", "image2", "/out.png"},
 		},
 		{
+			name: "audio image omits the resolution",
+			job:  ImageExtraction{InputPath: "/dev/fd/3", OutputPath: "/out.jpg", StreamIndex: &index, Audio: true, Resolution: "1280x720", EncoderAtLeast51: true},
+			want: []string{"-nostdin", "-i", "/dev/fd/3", "-map", "0:3", "-threads", "0", "-v", "quiet", "-vframes", "1",
+				"-vf", "scale=round(iw*sar/2)*2:round(ih/2)*2", "-fps_mode", "auto", "-f", "image2", "/out.jpg"},
+		},
+		{
 			name: "zscale does not tonemap Dolby Vision",
 			job:  ImageExtraction{InputPath: "/in.m2ts", Container: "m2ts", OutputPath: "/out.jpg", HDR: true, DolbyVision: true, SupportsZscale: true},
 			want: []string{"-nostdin", "-i", "/in.m2ts", "-threads", "0", "-v", "quiet", "-vframes", "1",

@@ -1159,6 +1159,8 @@ func (s *Scanner) scanLocked(ctx context.Context, opts RefreshOptions) (result R
 
 	queue := newScanQueue(s, scanCtx)
 	var series []seriesSeasonTask
+	var albums []albumImageTask
+	albumFolders := newAlbumScanFolders(opts)
 	_ = queue.run(initial, func(outcome scanOutcome) {
 		for _, skip := range outcome.skipped {
 			result.add(skip)
@@ -1166,9 +1168,13 @@ func (s *Scanner) scanLocked(ctx context.Context, opts RefreshOptions) (result R
 		}
 		result.add(outcome.progress)
 		record(outcome.progress)
+		albumFolders.record(outcome.progress)
 		s.completeRefreshUnit(outcome.collectionFolderID, outcome.progress.Status, len(outcome.children))
 		if outcome.series != nil && outcome.progress.Status == "scanned" {
 			series = append(series, *outcome.series)
+		}
+		if outcome.album != nil && outcome.progress.Status == "scanned" {
+			albums = append(albums, *outcome.album)
 		}
 	})
 	if err := scanCtx.Err(); err != nil {
@@ -1178,14 +1184,27 @@ func (s *Scanner) scanLocked(ctx context.Context, opts RefreshOptions) (result R
 		result.add(failed)
 		record(failed)
 	}
+	for _, failed := range s.refreshAlbumImages(scanCtx, albums) {
+		result.add(failed)
+		record(failed)
+	}
 	if err := scanCtx.Err(); err != nil {
 		return result, progress, err
+	}
+	// An album refreshes after its children (MusicAlbum.RefreshAllMetadata)
+	// and takes its artists from its songs.
+	if err := s.mergeMusicAlbumArtists(scanCtx, albumFolders); err != nil {
+		s.logger.Error("album artists", "error", err)
 	}
 	// Library post-scan tasks: CollectionPostScanTask.
 	if s.options.CollectionsPath != "" {
 		if err := s.AddMoviesToCollections(scanCtx, nil); err != nil {
 			s.logger.Error("auto collections", "error", err)
 		}
+	}
+	// ArtistsPostScanTask.
+	if err := s.validateArtists(scanCtx); err != nil {
+		s.logger.Error("artists", "error", err)
 	}
 	record(RefreshProgress{Status: "completed", Discovered: result.Discovered, Inserted: result.Inserted, Updated: result.Updated, Deleted: result.Deleted})
 	return result, progress, nil
@@ -1669,6 +1688,9 @@ type scanOutcome struct {
 	// series is set when the folder is a Series. The virtual-season pass
 	// runs for it after the scan stores its subtree.
 	series *seriesSeasonTask
+	// album is set when the folder is a MusicAlbum. The album image pass
+	// runs for it after the scan stores its subtree.
+	album *albumImageTask
 }
 
 // folderResolution holds the resolved items and probe results that
@@ -1750,11 +1772,11 @@ func (s *Scanner) reconcileRootPlan(ctx context.Context, plan rootScanPlan, forc
 // change. Absent items that inserted through ordinary reconciliation do not
 // count here; the partition is the only code that separates the two sets.
 func (s *Scanner) reconcileBackfill(ctx context.Context, folderID dto.UUID, desired []item.Item, virtuals []item.Item, forceRefresh bool, extraPreserve []dto.UUID) (backfillOutcome, error) {
-	existing, absent, err := s.partitionBackfillPlan(ctx, folderID, desired)
+	existing, absent, err := s.partitionBackfillPlan(ctx, folderID, desired, true)
 	if err != nil {
 		return backfillOutcome{}, fmt.Errorf("partition backfill plan: %w", err)
 	}
-	existingVirtuals, absentVirtuals, err := s.partitionBackfillPlan(ctx, folderID, virtuals)
+	existingVirtuals, absentVirtuals, err := s.partitionBackfillPlan(ctx, folderID, virtuals, false)
 	if err != nil {
 		return backfillOutcome{}, fmt.Errorf("partition backfill virtuals: %w", err)
 	}
@@ -1842,7 +1864,16 @@ const adoptedLookupBatch = 500
 // enrichment-only backfill; an absent item routes to the ordinary reconcile
 // insert path. A read failure returns an error so the caller never routes
 // existing rows to the insert path on a transient fault.
-func (s *Scanner) partitionBackfillPlan(ctx context.Context, folderID dto.UUID, desired []item.Item) (existing, absent []item.Item, err error) {
+//
+// For direct children (moved true), a stored row with a different Kind,
+// ParentID, or Path also routes to the ordinary reconcile, which adopts it
+// under this folder as an ordinary scan does. Such a row is the stale child
+// of a removed or case-variant folder that shares the candidate's
+// case-insensitive ID. The enrichment-only backfill rejects a structural
+// change, so without this route the stale row fails the folder on every
+// refresh. Virtual candidates (moved false) always route by ID: a Person,
+// Studio, or Genre keeps its stored path (store.MetadataBackfill).
+func (s *Scanner) partitionBackfillPlan(ctx context.Context, folderID dto.UUID, desired []item.Item, moved bool) (existing, absent []item.Item, err error) {
 	if len(desired) == 0 {
 		return nil, nil, nil
 	}
@@ -1854,18 +1885,38 @@ func (s *Scanner) partitionBackfillPlan(ctx context.Context, folderID dto.UUID, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("read stored items for folder %s: %w", folderID, err)
 	}
-	found := make(map[dto.UUID]struct{}, len(batch))
+	found := make(map[dto.UUID]item.Item, len(batch))
 	for _, stored := range batch {
-		found[stored.ID] = struct{}{}
+		found[stored.ID] = stored
 	}
 	for _, child := range desired {
-		if _, ok := found[child.ID]; ok {
+		stored, ok := found[child.ID]
+		if ok && moved && !sameBackfillStructure(child, stored) {
+			ok = false
+		}
+		if ok {
 			existing = append(existing, child)
 		} else {
 			absent = append(absent, child)
 		}
 	}
 	return existing, absent, nil
+}
+
+// sameBackfillStructure reports whether the candidate keeps the stored row's
+// Kind, ParentID, and Path, the structural identity the enrichment-only
+// backfill requires.
+func sameBackfillStructure(candidate, stored item.Item) bool {
+	if candidate.Kind != stored.Kind {
+		return false
+	}
+	if (candidate.ParentID == nil) != (stored.ParentID == nil) || (candidate.ParentID != nil && *candidate.ParentID != *stored.ParentID) {
+		return false
+	}
+	if (candidate.Path == nil) != (stored.Path == nil) || (candidate.Path != nil && *candidate.Path != *stored.Path) {
+		return false
+	}
+	return true
 }
 
 // mergeBackfillResults merges two ReconcileChildrenResult values into one.
@@ -1894,6 +1945,9 @@ func (s *Scanner) scanFolder(ctx context.Context, task scanTask) scanOutcome {
 	outcome := scanOutcome{progress: RefreshProgress{ItemID: task.folder.ID, Path: task.entry.Path, Status: "scanned", Progress: 100, Discovered: resolution.entryCount, Inserted: len(mutation.Inserted), Updated: len(mutation.Updated), Deleted: len(mutation.Deleted), BackfillUpdated: mutation.backfillUpdated, BackfillSkipped: mutation.backfillSkipped}, children: resolution.children, collectionFolderID: task.collectionFolderID, skipped: resolution.skipped}
 	if task.folder.Kind == item.KindSeries {
 		outcome.series = &seriesSeasonTask{series: task.folder, options: task.options}
+	}
+	if task.folder.Kind == item.KindMusicAlbum && !s.remoteBackfill {
+		outcome.album = &albumImageTask{albumID: task.folder.ID, collectionFolderID: scanTaskCollectionFolderID(task)}
 	}
 	return outcome
 }

@@ -2100,3 +2100,139 @@ func childIDs(items []item.Item) []dto.UUID {
 	}
 	return ids
 }
+
+// TestRefreshExistingMetadataKeepsCaseVariantVirtualPaths proves a Person or
+// Studio credit whose name differs only in case from the stored entity does
+// not fail the folder (#748). The entity ID comes from the lowercased name,
+// so the credit resolves to the stored row with a different literal path.
+// The backfill keeps the stored path and still persists the folder's provider
+// enrichment.
+func TestRefreshExistingMetadataKeepsCaseVariantVirtualPaths(t *testing.T) {
+	harness := newScannerHarness(t, &scannerFixtureResolver{})
+	movie := scannerPath(t, harness.source, "crouching-tiger.mkv")
+	writeScannerFile(t, movie, "crouching tiger")
+
+	seed := &probeFieldRefresher{
+		studios: []string{"Starz"},
+		people:  []item.PersonCredit{{Name: "Cheng Pei-Pei", Type: item.PersonKindActor}},
+	}
+	newBackfillScannerWithRefresher(t, harness, seed)
+	if _, err := harness.scanner.ScanWithOptions(t.Context(), library.DefaultRefreshOptions()); err != nil {
+		t.Fatalf("seed scan: %v", err)
+	}
+	person := library.PersonEntity("Cheng Pei-Pei")
+	storedPerson, err := harness.items.Get(t.Context(), person.ID)
+	if err != nil {
+		t.Fatalf("load seeded Person: %v", err)
+	}
+	var storedStudio item.Item
+	for _, candidate := range scannerItems(t, harness.items) {
+		if candidate.Kind == item.KindStudio {
+			storedStudio = candidate
+		}
+	}
+	if storedStudio.ID.IsNil() {
+		t.Fatalf("seed scan stored no Studio")
+	}
+
+	backfill := &probeFieldRefresher{
+		studios:      []string{"STARZ"},
+		people:       []item.PersonCredit{{Name: "cheng pei-pei", Type: item.PersonKindActor}},
+		providerID:   "146",
+		providerName: "Tmdb",
+		remoteImage:  "https://image.tmdb.org/t/p/original/tiger.jpg",
+	}
+	newBackfillScannerWithRefresher(t, harness, backfill)
+	result, err := harness.scanner.RefreshExistingMetadata(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("backfill with case-variant credits: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("backfill errors = %v, want none — a case-variant credit must not fail the folder", result.Errors)
+	}
+	if result.PersistedProviderIDs == 0 || result.PersistedImages == 0 {
+		t.Fatalf("persisted provider IDs = %d, images = %d, want both > 0", result.PersistedProviderIDs, result.PersistedImages)
+	}
+	enriched := scannerItemAtPath(t, harness.items, movie)
+	if id, ok := enriched.ProviderIDs.Get("Tmdb"); !ok || id != "146" {
+		t.Fatalf("movie Tmdb id = %q,%t, want 146,true", id, ok)
+	}
+	if !hasRemotePrimaryImage(enriched, "https://image.tmdb.org/t/p/original/tiger.jpg") {
+		t.Fatalf("movie ImageInfos = %#v, want the remote primary image", enriched.ImageInfos)
+	}
+	afterPerson, err := harness.items.Get(t.Context(), person.ID)
+	if err != nil {
+		t.Fatalf("load Person after backfill: %v", err)
+	}
+	if !reflect.DeepEqual(afterPerson.Path, storedPerson.Path) {
+		t.Fatalf("Person Path = %v, want the stored %v", afterPerson.Path, storedPerson.Path)
+	}
+	afterStudio, err := harness.items.Get(t.Context(), storedStudio.ID)
+	if err != nil {
+		t.Fatalf("load Studio after backfill: %v", err)
+	}
+	if !reflect.DeepEqual(afterStudio.Path, storedStudio.Path) {
+		t.Fatalf("Studio Path = %v, want the stored %v", afterStudio.Path, storedStudio.Path)
+	}
+}
+
+// TestRefreshExistingMetadataAdoptsStaleCaseVariantChild proves a stored row
+// that a removed case-variant folder left behind does not fail its surviving
+// sibling (#748). The row shares the scanned child's case-insensitive ID but
+// names the removed folder as its parent. The backfill adopts it under the
+// scanned folder, as an ordinary scan does, and enriches the folder.
+func TestRefreshExistingMetadataAdoptsStaleCaseVariantChild(t *testing.T) {
+	harness := newScannerHarness(t, &scannerFixtureResolver{})
+	album := scannerPath(t, harness.source, "Red (2021)")
+	disc := scannerPath(t, album, "Digital Media 02")
+	track := scannerPath(t, disc, "track.mkv")
+	writeScannerFile(t, track, "track")
+
+	seed := &probeFieldRefresher{providerID: "1", providerName: "Tmdb"}
+	newBackfillScannerWithRefresher(t, harness, seed)
+	if _, err := harness.scanner.ScanWithOptions(t.Context(), library.DefaultRefreshOptions()); err != nil {
+		t.Fatalf("seed scan: %v", err)
+	}
+	storedAlbum := scannerItemAtPath(t, harness.items, album)
+	storedDisc := scannerItemAtPath(t, harness.items, disc)
+
+	// Simulate the removed twin: a stale folder row and the disc row stored
+	// under it with the twin's path.
+	twinPath := scannerPath(t, harness.source, "Red (2021) twin")
+	twin := storedAlbum
+	twin.ID = scannerID(twinPath)
+	twin.Path = scannerString(twinPath)
+	twin.Name = scannerString("Red (2021) twin")
+	if err := harness.items.Upsert(t.Context(), twin); err != nil {
+		t.Fatalf("seed stale twin folder: %v", err)
+	}
+	stale := storedDisc
+	stale.ParentID = &twin.ID
+	stale.Path = scannerString(scannerPath(t, twinPath, "Digital Media 02"))
+	if err := harness.items.Upsert(t.Context(), stale); err != nil {
+		t.Fatalf("move disc under the stale twin: %v", err)
+	}
+
+	backfill := &probeFieldRefresher{omitProbeFields: true, providerID: "1", providerName: "Tmdb", remoteImage: "https://image.tmdb.org/t/p/original/red.jpg"}
+	newBackfillScannerWithRefresher(t, harness, backfill)
+	result, err := harness.scanner.RefreshExistingMetadata(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("backfill with a stale case-variant child: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("backfill errors = %v, want none — a stale child must not fail its surviving sibling", result.Errors)
+	}
+	adopted, err := harness.items.Get(t.Context(), storedDisc.ID)
+	if err != nil {
+		t.Fatalf("load disc after backfill: %v", err)
+	}
+	if adopted.ParentID == nil || *adopted.ParentID != storedAlbum.ID {
+		t.Fatalf("disc ParentID = %v, want the scanned album %s", adopted.ParentID, storedAlbum.ID)
+	}
+	if adopted.Path == nil || *adopted.Path != disc {
+		t.Fatalf("disc Path = %v, want %q", adopted.Path, disc)
+	}
+	if !hasRemotePrimaryImage(scannerItemAtPath(t, harness.items, track), "https://image.tmdb.org/t/p/original/red.jpg") {
+		t.Fatalf("track under the adopted disc was not enriched")
+	}
+}

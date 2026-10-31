@@ -112,11 +112,19 @@ func TestDynamicImageProviderEnablementAndOrder(t *testing.T) {
 			}}},
 			want: both,
 		},
+		{name: "audio has only the Image Extractor", kind: item.KindAudio, want: []string{AudioImageExtractorName}},
+		{
+			name:     "server disabled list turns off the Image Extractor",
+			kind:     item.KindAudio,
+			settings: DynamicImageSettings{DisabledImageFetchers: []string{"image extractor"}},
+			want:     []string{},
+		},
 	}
 	providers := NewDynamicImages(DynamicImagesOptions{})
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := dynamicImageNames(providers.enabledProviders(test.options, test.kind, test.settings))
+			path := "/media/file"
+			got := dynamicImageNames(providers.enabledProviders(test.options, item.Item{Kind: test.kind, Path: &path}, test.settings))
 			if !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("enabled providers = %q, want %q", got, test.want)
 			}
@@ -207,6 +215,50 @@ func TestEmbeddedImageExtractorPlan(t *testing.T) {
 	}
 	if _, ok := (embeddedImageExtractor{}).Plan(movie, item.ImageTypeBackdrop, streams, nil); ok {
 		t.Fatal("backdrop planned without a matching comment")
+	}
+}
+
+func TestAudioImageExtractorPlan(t *testing.T) {
+	path := "/music/Album/01.flac"
+	track := item.Item{Kind: item.KindAudio, Path: &path}
+	if !(audioImageExtractor{}).Supports(track) {
+		t.Fatal("Image Extractor does not support a track")
+	}
+	book := track
+	book.Kind = item.KindAudioBook
+	if !(audioImageExtractor{}).Supports(book) {
+		t.Fatal("Image Extractor does not support an audiobook")
+	}
+	movie := track
+	movie.Kind = item.KindMovie
+	if (audioImageExtractor{}).Supports(movie) || (embeddedImageExtractor{}).Supports(track) || (screenGrabber{}).Supports(track) {
+		t.Fatal("audio and video providers overlap")
+	}
+	if _, ok := (audioImageExtractor{}).Plan(track, item.ImageTypePrimary, []playback.MediaStream{{Type: playback.StreamTypeAudio, Index: 0, Codec: "flac"}}, nil); ok {
+		t.Fatal("Image Extractor planned an image without an embedded image stream")
+	}
+
+	back, front, other := "Cover (back)", "Cover (front)", "Other"
+	streams := []playback.MediaStream{
+		{Type: playback.StreamTypeAudio, Index: 0, Codec: "flac"},
+		{Type: playback.StreamTypeEmbeddedImage, Index: 1, Codec: "png", Comment: &other},
+		{Type: playback.StreamTypeEmbeddedImage, Index: 2, Codec: "mjpeg", Comment: &back},
+		{Type: playback.StreamTypeEmbeddedImage, Index: 3, Codec: "mjpeg", Comment: &front},
+	}
+	tests := []struct {
+		name    string
+		streams []playback.MediaStream
+		want    int
+	}{
+		{name: "front wins", streams: streams, want: 3},
+		{name: "then cover", streams: streams[:3], want: 2},
+		{name: "then the first image", streams: streams[:2], want: 1},
+	}
+	for _, test := range tests {
+		plan, ok := audioImageExtractor{}.Plan(track, item.ImageTypePrimary, test.streams, nil)
+		if !ok || plan.job.StreamIndex == nil || *plan.job.StreamIndex != test.want || !plan.job.Audio || plan.job.Container != "" || plan.extension != ".jpg" {
+			t.Fatalf("%s: plan = %+v, %v; want audio index %d as jpg", test.name, plan, ok, test.want)
+		}
 	}
 }
 
@@ -375,4 +427,47 @@ func TestRefreshDynamicImagesSavesAndSkips(t *testing.T) {
 			t.Fatalf("episode refresh = %v with %d jobs, want no backdrop work", err, len(extractor.jobs))
 		}
 	})
+}
+
+func TestCopyFolderImage(t *testing.T) {
+	metadata := t.TempDir()
+	providers := NewDynamicImages(DynamicImagesOptions{MetadataPath: metadata})
+	trackID, err := dto.ParseUUID("00000001-0000-4000-8000-000000000784")
+	if err != nil {
+		t.Fatal(err)
+	}
+	albumID, err := dto.ParseUUID("00000002-0000-4000-8000-000000000784")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative := filepath.Join(internalMetadataRelative(trackID), "poster-0011.jpg")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(metadata, relative)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metadata, relative), []byte("cover"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	track := item.Item{ID: trackID, Kind: item.KindAudio, ImageInfos: []item.ImageInfo{{Type: item.ImageTypePrimary, Path: dynamicMetadataPathToken + "/" + filepath.ToSlash(relative)}}}
+
+	for _, path := range []string{"https://example.invalid/cover.jpg", "/media/cover"} {
+		remote := item.Item{ID: trackID, Kind: item.KindAudio, ImageInfos: []item.ImageInfo{{Type: item.ImageTypePrimary, Path: path}}}
+		album := item.Item{ID: albumID, Kind: item.KindMusicAlbum}
+		if copied, err := providers.CopyFolderImage(t.Context(), remote, &album, item.ImageTypePrimary); copied || err != nil || len(album.ImageInfos) != 0 {
+			t.Fatalf("copy from %q = %v, %v, images %+v; want no copy", path, copied, err, album.ImageInfos)
+		}
+	}
+
+	album := item.Item{ID: albumID, Kind: item.KindMusicAlbum}
+	copied, err := providers.CopyFolderImage(t.Context(), track, &album, item.ImageTypePrimary)
+	if err != nil || !copied || len(album.ImageInfos) != 1 {
+		t.Fatalf("copy = %v, %v, images %+v; want one Primary image", copied, err, album.ImageInfos)
+	}
+	prefix := dynamicMetadataPathToken + "/" + filepath.ToSlash(internalMetadataRelative(albumID)) + "/poster-"
+	if image := album.ImageInfos[0]; image.Type != item.ImageTypePrimary || !strings.HasPrefix(image.Path, prefix) || !strings.HasSuffix(image.Path, ".jpg") {
+		t.Fatalf("album image = %+v, want %s<tag>.jpg", image, prefix)
+	}
+	data, err := os.ReadFile(filepath.Join(metadata, filepath.FromSlash(strings.TrimPrefix(album.ImageInfos[0].Path, dynamicMetadataPathToken+"/"))))
+	if err != nil || string(data) != "cover" {
+		t.Fatalf("album image file = %q, %v; want the track cover", data, err)
+	}
 }

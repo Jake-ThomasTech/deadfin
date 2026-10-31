@@ -139,7 +139,7 @@ func TestLibraryAvailableOptionsShape(t *testing.T) {
 			want: availableOptionsLists +
 				"MusicArtist metadata [MusicBrainz,TheAudioDB] images [TheAudioDB] similar [Local Genre/Tag] supported [Primary,Logo,Banner,Backdrop] defaults [Backdrop:1:1280,Banner:0:0,Art:0:0,Logo:1:0]\n" +
 				"MusicAlbum metadata [MusicBrainz,TheAudioDB] images [TheAudioDB] similar [Local Genre/Tag] supported [Primary,Disc] defaults [Backdrop:0:1280,Disc:0:0]\n" +
-				"Audio metadata [] images [] similar [Local Genre/Tag] supported [] defaults []\n" +
+				"Audio metadata [] images [Image Extractor] similar [Local Genre/Tag] supported [Primary] defaults []\n" +
 				"MusicVideo metadata [] images [-Embedded Image Extractor,Screen Grabber] similar [] supported [Primary,Backdrop,Logo] defaults [" + movieDefaults + "]",
 		},
 		{
@@ -150,7 +150,7 @@ func TestLibraryAvailableOptionsShape(t *testing.T) {
 			want: availableOptionsLists +
 				"MusicArtist metadata [MusicBrainz,-TheAudioDB] images [TheAudioDB] similar [Local Genre/Tag] supported [Primary,Logo,Banner,Backdrop] defaults [Backdrop:1:1280,Banner:0:0,Art:0:0,Logo:1:0]\n" +
 				"MusicAlbum metadata [MusicBrainz,-TheAudioDB] images [TheAudioDB] similar [Local Genre/Tag] supported [Primary,Disc] defaults [Backdrop:0:1280,Disc:0:0]\n" +
-				"Audio metadata [] images [] similar [Local Genre/Tag] supported [] defaults []\n" +
+				"Audio metadata [] images [Image Extractor] similar [Local Genre/Tag] supported [Primary] defaults []\n" +
 				"MusicVideo metadata [] images [Embedded Image Extractor,Screen Grabber] similar [] supported [Primary,Backdrop,Logo] defaults [" + movieDefaults + "]",
 		},
 		{

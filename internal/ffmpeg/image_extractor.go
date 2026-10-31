@@ -36,8 +36,8 @@ func NewImageExtractor(path string, parallel int) *ImageExtractor {
 
 // Extract writes one image from source to job.OutputPath. It tries the
 // I-frame extraction first and then the standard extraction, as
-// MediaEncoder.ExtractImage does. job.InputPath and job.UseIFrame are set
-// here. A timeout of zero or less selects the upstream default.
+// MediaEncoder.ExtractImage does. An audio image takes the standard
+// extraction only. job.InputPath and job.UseIFrame are set here. A timeout of zero or less selects the upstream default.
 func (e *ImageExtractor) Extract(ctx context.Context, job encoding.ImageExtraction, source *sourcefile.Source, timeout time.Duration) error {
 	if e == nil {
 		return errors.New("ffmpeg image extractor is required")
@@ -52,6 +52,10 @@ func (e *ImageExtractor) Extract(ctx context.Context, job encoding.ImageExtracti
 		}
 	}
 	job.InputPath = sourcefile.FDPath(ExtractorSourceFD)
+	if job.Audio {
+		job.UseIFrame = false
+		return e.extractOnce(ctx, job, source, timeout)
+	}
 	job.UseIFrame = true
 	firstErr := e.extractOnce(ctx, job, source, timeout)
 	if firstErr == nil {

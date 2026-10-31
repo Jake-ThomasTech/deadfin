@@ -2227,3 +2227,63 @@ func providerIDsEqual(got, want item.ProviderIDs) bool {
 	}
 	return true
 }
+
+// TestItemStoreMetadataBackfillKeepsStoredVirtualPathSQLite proves a virtual
+// candidate whose path differs only in case from the stored row merges onto
+// that row and keeps the stored path (#748).
+func TestItemStoreMetadataBackfillKeepsStoredVirtualPathSQLite(t *testing.T) {
+	runItemStoreMetadataBackfillKeepsStoredVirtualPath(t, openItemStore)
+}
+
+// TestItemStoreMetadataBackfillKeepsStoredVirtualPathPostgres proves the
+// same virtual path contract against PostgreSQL.
+func TestItemStoreMetadataBackfillKeepsStoredVirtualPathPostgres(t *testing.T) {
+	runItemStoreMetadataBackfillKeepsStoredVirtualPath(t, openPostgresItemStore)
+}
+
+func runItemStoreMetadataBackfillKeepsStoredVirtualPath(t *testing.T, open func(*testing.T) *store.ItemStore) {
+	t.Helper()
+
+	items := open(t)
+	parent := hierarchyItem(t, 12300, item.KindFolder, nil)
+	if err := items.Upsert(t.Context(), parent); err != nil {
+		t.Fatalf("upsert parent: %v", err)
+	}
+	movie := reconciliationChild(t, 12301, item.KindMovie, parent.ID, "virtual path movie")
+	if err := items.Upsert(t.Context(), movie); err != nil {
+		t.Fatalf("seed movie: %v", err)
+	}
+	studio := hierarchyItem(t, 12310, item.KindStudio, nil)
+	studio.Name = stringPtr("Starz")
+	studio.Path = stringPtr("%MetadataPath%/Studio/Starz")
+	if err := items.Upsert(t.Context(), studio); err != nil {
+		t.Fatalf("seed Studio: %v", err)
+	}
+
+	remoteMovie := item.Item{ID: movie.ID, Kind: movie.Kind, ParentID: movie.ParentID, Path: movie.Path, Name: movie.Name}
+	remoteMovie.ProviderIDs = providerIDs("Tmdb", "146")
+	variant := item.Item{ID: studio.ID, Kind: item.KindStudio, Path: stringPtr("%MetadataPath%/Studio/STARZ"), Name: stringPtr("STARZ")}
+
+	savedAt := time.Date(2026, time.October, 31, 12, 0, 0, 0, time.UTC)
+	result, err := items.MetadataBackfill(t.Context(), parent.ID, []item.Item{remoteMovie}, []item.Item{variant}, savedAt, store.MetadataBackfillOptions{})
+	if err != nil {
+		t.Fatalf("metadata backfill with a case-variant virtual path: %v", err)
+	}
+	if len(result.Updated) != 1 || result.Updated[0] != movie.ID {
+		t.Fatalf("updated = %v, want [%s]", result.Updated, movie.ID)
+	}
+	loaded, err := items.Get(t.Context(), studio.ID)
+	if err != nil {
+		t.Fatalf("get Studio: %v", err)
+	}
+	if loaded.Path == nil || *loaded.Path != "%MetadataPath%/Studio/Starz" {
+		t.Fatalf("Studio Path = %v, want the stored path", loaded.Path)
+	}
+	enriched, err := items.Get(t.Context(), movie.ID)
+	if err != nil {
+		t.Fatalf("get movie: %v", err)
+	}
+	if id, ok := enriched.ProviderIDs.Get("Tmdb"); !ok || id != "146" {
+		t.Fatalf("movie Tmdb id = %q,%t, want 146,true", id, ok)
+	}
+}

@@ -353,7 +353,7 @@ func (e storeEnricher) namedEntities(ctx context.Context, values []item.Item, op
 	wantGenres := hasField(options.Fields, "Genres")
 	wantArtists := false
 	for _, value := range values {
-		if value.Kind == item.KindAudio && (len(value.Values.Artists) != 0 || len(value.Values.AlbumArtists) != 0) {
+		if hasArtistValues(value.Kind) && (len(value.Values.Artists) != 0 || len(value.Values.AlbumArtists) != 0) {
 			wantArtists = true
 			break
 		}
@@ -375,7 +375,7 @@ func (e storeEnricher) namedEntities(ctx context.Context, values []item.Item, op
 	}
 	for _, value := range values {
 		addKeys(value.Values.Genres)
-		if value.Kind == item.KindAudio {
+		if hasArtistValues(value.Kind) {
 			addKeys(value.Values.Artists)
 			addKeys(value.Values.AlbumArtists)
 		}
@@ -452,6 +452,8 @@ func applyRelatedProjection(enrichment *Enrichment, value item.Item, graph relat
 				enrichment.Album = dereference(related.Name)
 			}
 		}
+	}
+	if hasArtistValues(value.Kind) {
 		enrichment.ArtistItems = namedPairs(value.Values.Artists, entities.artists)
 		enrichment.AlbumArtists = namedPairs(value.Values.AlbumArtists, entities.artists)
 	}
@@ -460,6 +462,12 @@ func applyRelatedProjection(enrichment *Enrichment, value item.Item, graph relat
 		genreIDs = entities.musicGenres
 	}
 	enrichment.GenreItems = namedPairs(value.Values.Genres, genreIDs)
+}
+
+// hasArtistValues reports whether items of kind implement IHasArtist and
+// IHasAlbumArtist (Audio and MusicAlbum), whose DTOs name artist items.
+func hasArtistValues(kind item.Kind) bool {
+	return kind == item.KindAudio || kind == item.KindMusicAlbum
 }
 
 func namedPairs(names []string, ids map[string]dto.UUID) []dto.NameGuidPair {
