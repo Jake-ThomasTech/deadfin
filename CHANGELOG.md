@@ -110,6 +110,11 @@ v0.3.0 is the first public alpha of Deadfin.
   directories and their tile directories as Folder items that showed in
   browse and search. The next scan removes Folder items that an earlier scan
   made for them (#704).
+- The library scan ignores Synology and QNAP system directories, as
+  Jellyfin does: `@eaDir`, `eaDir`, `#recycle`, `@Recycle`, `.@__thumb`,
+  `$RECYCLE.BIN`, `System Volume Information` and `.grab`. On a Synology
+  share, Deadfin indexed the `@eaDir` thumbnail directories as items, and an
+  `@eaDir` at the root of a Shows library became a series named "@eaDir".
 - HLS copies a Dolby Vision profile 7 (dual-layer) HEVC stream as HDR10 for a
   client that lists `HDR10` but not `DOVIWithEL` in its range types. The copy
   removes the RPU and the enhancement layer with `hevc_metadata=remove_dovi`

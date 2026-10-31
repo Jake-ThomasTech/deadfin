@@ -12,10 +12,27 @@ import (
 // SaveTrickplayWithMedia).
 const trickplaySuffix = ".trickplay"
 
-// ignoredPath ports the trickplay patterns of upstream IgnorePatterns
-// (Emby.Server.Implementations/Library/IgnorePatterns.cs:72-74):
-// "**/*.trickplay" and "**/*.trickplay/**", evaluated case-insensitively.
-// A path is ignored when any of its components ends in ".trickplay".
+// nasSystemDirs ports the Synology and QNAP patterns of upstream
+// IgnorePatterns (Emby.Server.Implementations/Library/IgnorePatterns.cs:82-100).
+// Each name appears there as "**/name" and "**/name/**", so a path is ignored
+// when any of its components is one of these names, compared
+// case-insensitively.
+var nasSystemDirs = []string{
+	"eaDir",
+	"@eaDir",
+	"#recycle",
+	"@Recycle",
+	".@__thumb",
+	"$RECYCLE.BIN",
+	"System Volume Information",
+	".grab",
+}
+
+// ignoredPath ports two groups of upstream IgnorePatterns, evaluated
+// case-insensitively: the trickplay patterns "**/*.trickplay" and
+// "**/*.trickplay/**" (IgnorePatterns.cs:72-74), which ignore a path when any
+// of its components ends in ".trickplay", and the NAS system directories in
+// nasSystemDirs.
 // CoreResolutionIgnoreRule.ShouldIgnore applies the patterns before
 // resolution, and LibraryManager.ResolvePath also drops ignored entries from
 // FileSystemChildren, so an ignored entry is neither an item nor a child that
@@ -23,6 +40,18 @@ const trickplaySuffix = ".trickplay"
 func ignoredPath(path string) bool {
 	for _, component := range strings.FieldsFunc(path, isPathSeparator) {
 		if len(component) >= len(trickplaySuffix) && strings.EqualFold(component[len(component)-len(trickplaySuffix):], trickplaySuffix) {
+			return true
+		}
+		if isNASSystemDir(component) {
+			return true
+		}
+	}
+	return false
+}
+
+func isNASSystemDir(component string) bool {
+	for _, name := range nasSystemDirs {
+		if strings.EqualFold(component, name) {
 			return true
 		}
 	}

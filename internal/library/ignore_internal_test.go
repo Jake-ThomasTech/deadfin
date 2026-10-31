@@ -27,6 +27,36 @@ func TestIgnoredPathMatchesUpstreamTrickplayPatterns(t *testing.T) {
 	}
 }
 
+// TestIgnoredPathMatchesUpstreamNASPatterns covers the Synology and QNAP
+// patterns of upstream IgnorePatterns.cs:82-100.
+func TestIgnoredPathMatchesUpstreamNASPatterns(t *testing.T) {
+	for _, testCase := range []struct {
+		path string
+		want bool
+	}{
+		{"/media/tv/@eaDir", true},
+		{"/media/tv/@eaDir/Show/SYNOINDEX_MEDIA_INFO", true},
+		{"/media/tv/Show/Season 01/@eaDir/Show - S01E01.mkv/SYNOVIDEO_VIDEO_SCREENSHOT.jpg", true},
+		{"/media/movies/@EADIR", true},
+		{"/media/movies/eaDir/Film.mkv", true},
+		{"/media/movies/#recycle/Film (2023)/Film (2023).mkv", true},
+		{"/media/movies/@Recycle/Film.mkv", true},
+		{"/media/movies/.@__thumb/Film.jpg", true},
+		{"/media/movies/$RECYCLE.BIN/Film.mkv", true},
+		{"/media/movies/System Volume Information", true},
+		{"/media/movies/.grab/Film.mkv", true},
+		{`D:\media\tv\@eaDir\Show`, true},
+		{"/media/movies/Film @eaDir (2023)/Film.mkv", false},
+		{"/media/movies/eaDirector (2023)/eaDirector (2023).mkv", false},
+		{"/media/movies/recycle/Film.mkv", false},
+		{"/media/movies/Recycle (2019)/Recycle (2019).mkv", false},
+	} {
+		if got := ignoredPath(testCase.path); got != testCase.want {
+			t.Errorf("ignoredPath(%q) = %t, want %t", testCase.path, got, testCase.want)
+		}
+	}
+}
+
 func TestWithoutIgnoredEntriesKeepsInput(t *testing.T) {
 	entries := []Entry{{Path: "/m/a.mkv"}, {Path: "/m/a.trickplay", IsDir: true}, {Path: "/m/b.mkv"}}
 	kept := withoutIgnoredEntries(entries)
