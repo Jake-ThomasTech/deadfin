@@ -292,6 +292,31 @@ func TestProviderMovieImageDimensionsReplace(t *testing.T) {
 	assertImageDimensions(t, target.ImageInfos, item.ImageTypePrimary, "https://image.tmdb.org/t/p/original/best-poster.jpg", 500, 750)
 }
 
+// TestProviderMovieUntaggedBackdrops proves a replacing refresh of a movie
+// matched by TMDb id requests include_image_language=en,null and attaches the
+// first untagged backdrop as Backdrop, after a tagged one that maps to Thumb
+// (#783).
+func TestProviderMovieUntaggedBackdrops(t *testing.T) {
+	provider := newCassetteProvider(t, "testdata/untagged-backdrops.json")
+	refresh := movieRefreshContext()
+	refresh.Image = library.RefreshModeFullRefresh
+	refresh.ReplaceAllImages = true
+	target := item.Item{Kind: item.KindMovie, Name: stringPtr("2 Fast 2 Furious")}
+	target.ProviderIDs.Set("Tmdb", "584")
+
+	handled, err := provider.Refresh(t.Context(), refresh, &target)
+	if err != nil {
+		t.Fatalf("refresh movie: %v", err)
+	}
+	if !handled {
+		t.Fatal("provider did not claim the movie despite a matching cassette")
+	}
+	assertImageDimensions(t, target.ImageInfos, item.ImageTypePrimary, "https://image.tmdb.org/t/p/original/2f2f-poster.jpg", 500, 750)
+	assertImageDimensions(t, target.ImageInfos, item.ImageTypeBackdrop, "https://image.tmdb.org/t/p/original/2f2f-backdrop.jpg", 1920, 1080)
+	assertImageDimensions(t, target.ImageInfos, item.ImageTypeThumb, "https://image.tmdb.org/t/p/original/2f2f-text-backdrop.jpg", 1280, 720)
+	assertImageDimensions(t, target.ImageInfos, item.ImageTypeLogo, "https://image.tmdb.org/t/p/original/2f2f-logo.png", 800, 310)
+}
+
 // TestProviderMovieImageDimensionsPosterFallback proves that a movie with no
 // usable image collection attaches poster_path as Primary with unknown (zero)
 // dimensions, because poster_path carries none.

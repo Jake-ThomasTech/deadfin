@@ -247,3 +247,25 @@ func TestLookupSeriesImageDimensionsPosterFallback(t *testing.T) {
 	}
 	assertRemoteImageDimensions(t, images, item.ImageTypePrimary, "https://image.tmdb.org/t/p/original/bb-poster.jpg", 0, 0)
 }
+
+// TestLookupMovieImagesUntaggedBackdrops proves a RemoteImages lookup with a
+// language set still lists TMDb's untagged backdrops as Backdrop. Like
+// upstream's GetMovieAsync(id, null, null, null), the request carries no
+// language: TMDb would otherwise return only the request-language images, and
+// every listed backdrop would map to Thumb (#783).
+func TestLookupMovieImagesUntaggedBackdrops(t *testing.T) {
+	provider := newCassetteLookupProvider(t, "testdata/untagged-backdrops.json")
+	images, err := provider.Images(context.Background(), providers.ImageLookup{
+		Kind:        item.KindMovie,
+		Language:    "en",
+		ProviderIDs: map[string]string{"Tmdb": "584"},
+	})
+	if err != nil {
+		t.Fatalf("Images: %v", err)
+	}
+	assertRemoteImageDimensions(t, images, item.ImageTypeBackdrop, "https://image.tmdb.org/t/p/original/2f2f-backdrop.jpg", 1920, 1080)
+	assertRemoteImageDimensions(t, images, item.ImageTypeBackdrop, "https://image.tmdb.org/t/p/original/2f2f-backdrop-2.jpg", 1280, 720)
+	assertRemoteImageDimensions(t, images, item.ImageTypeThumb, "https://image.tmdb.org/t/p/original/2f2f-text-backdrop.jpg", 1280, 720)
+	assertRemoteImageDimensions(t, images, item.ImageTypeThumb, "https://image.tmdb.org/t/p/original/2f2f-text-backdrop-fr.jpg", 1280, 720)
+	assertRemoteImageDimensions(t, images, item.ImageTypePrimary, "https://image.tmdb.org/t/p/original/2f2f-poster-fr.jpg", 500, 750)
+}

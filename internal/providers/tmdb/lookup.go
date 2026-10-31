@@ -207,8 +207,11 @@ func (provider *LookupProvider) searchSeries(ctx context.Context, lookup provide
 // TmdbMovieImageProvider.GetImages and TmdbSeriesImageProvider.GetImages. It
 // fetches the detail response (which includes the images collection) and maps
 // posters, backdrops, and logos. Language-tagged backdrops are mapped to Thumb
-// as in ConvertToRemoteImageInfo (provider.go:237-269). The include_image_language
-// param is omitted so TMDb returns images in ALL languages; the identify service's
+// as in ConvertToRemoteImageInfo (provider.go:237-269). Like upstream's
+// GetMovieAsync(id, null, null, null), the request carries neither language nor
+// include_image_language: TMDb filters the images collection to the request
+// language when language is set, which drops the untagged backdrops. Without
+// both params TMDb returns images in all languages; the identify service's
 // FilterImagesByLanguage and SortRemoteImages apply the language filter and
 // ordering post-fetch, honoring includeAllLanguages.
 func (provider *LookupProvider) Images(ctx context.Context, lookup providers.ImageLookup) ([]providers.RemoteImageInfo, error) {
@@ -218,7 +221,6 @@ func (provider *LookupProvider) Images(ctx context.Context, lookup providers.Ima
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	language := normalizeLanguage(strings.TrimSpace(lookup.Language), "")
 	base := provider.api.imageBaseURL(ctx)
 	size := provider.config.imageSizeOrOriginal()
 
@@ -228,7 +230,7 @@ func (provider *LookupProvider) Images(ctx context.Context, lookup providers.Ima
 		if tmdbID == 0 {
 			return nil, nil
 		}
-		result, err := provider.api.getMovie(ctx, tmdbID, language, "")
+		result, err := provider.api.getMovie(ctx, tmdbID, "", "")
 		if err != nil || result == nil {
 			return nil, err
 		}
@@ -238,7 +240,7 @@ func (provider *LookupProvider) Images(ctx context.Context, lookup providers.Ima
 		if tmdbID == 0 {
 			return nil, nil
 		}
-		result, err := provider.api.getSeries(ctx, tmdbID, language, "")
+		result, err := provider.api.getSeries(ctx, tmdbID, "", "")
 		if err != nil || result == nil {
 			return nil, err
 		}

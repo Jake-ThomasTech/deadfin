@@ -1,0 +1,185 @@
+[
+  {
+    "method": "GET",
+    "url": "https://api.themoviedb.org/3/configuration",
+    "status": 200,
+    "header": {
+      "Cache-Control": [
+        "public, max-age=3600"
+      ],
+      "Content-Type": [
+        "application/json"
+      ]
+    },
+    "body": {
+      "images": {
+        "secure_base_url": "https://image.tmdb.org/t/p/",
+        "poster_sizes": [
+          "w92",
+          "w154",
+          "w185",
+          "w342",
+          "w500",
+          "w780",
+          "original"
+        ],
+        "backdrop_sizes": [
+          "w300",
+          "w780",
+          "w1280",
+          "original"
+        ]
+      }
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.themoviedb.org/3/movie/584?append_to_response=credits,release_dates,images,videos,keywords",
+    "status": 200,
+    "header": {
+      "Content-Type": [
+        "application/json"
+      ]
+    },
+    "body": {
+      "id": 584,
+      "title": "2 Fast 2 Furious",
+      "original_title": "2 Fast 2 Furious",
+      "original_language": "en",
+      "poster_path": "/2f2f-poster.jpg",
+      "release_date": "2003-06-05",
+      "imdb_id": "tt0322259",
+      "images": {
+        "posters": [
+          {
+            "file_path": "/2f2f-poster.jpg",
+            "iso_639_1": "en",
+            "width": 500,
+            "height": 750,
+            "vote_average": 5.3,
+            "vote_count": 4
+          },
+          {
+            "file_path": "/2f2f-poster-fr.jpg",
+            "iso_639_1": "fr",
+            "width": 500,
+            "height": 750,
+            "vote_average": 5.3,
+            "vote_count": 4
+          }
+        ],
+        "backdrops": [
+          {
+            "file_path": "/2f2f-text-backdrop.jpg",
+            "iso_639_1": "en",
+            "width": 1280,
+            "height": 720,
+            "vote_average": 5.3,
+            "vote_count": 4
+          },
+          {
+            "file_path": "/2f2f-backdrop.jpg",
+            "iso_639_1": null,
+            "width": 1920,
+            "height": 1080,
+            "vote_average": 5.3,
+            "vote_count": 4
+          },
+          {
+            "file_path": "/2f2f-text-backdrop-fr.jpg",
+            "iso_639_1": "fr",
+            "width": 1280,
+            "height": 720,
+            "vote_average": 5.3,
+            "vote_count": 4
+          },
+          {
+            "file_path": "/2f2f-backdrop-2.jpg",
+            "iso_639_1": null,
+            "width": 1280,
+            "height": 720,
+            "vote_average": 5.3,
+            "vote_count": 4
+          }
+        ],
+        "logos": [
+          {
+            "file_path": "/2f2f-logo.png",
+            "iso_639_1": "en",
+            "width": 800,
+            "height": 310,
+            "vote_average": 5.3,
+            "vote_count": 4
+          }
+        ]
+      }
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.themoviedb.org/3/movie/584?language=en&include_image_language=en,null&append_to_response=credits,release_dates,images,videos,keywords",
+    "status": 200,
+    "header": {
+      "Content-Type": [
+        "application/json"
+      ]
+    },
+    "body": {
+      "id": 584,
+      "title": "2 Fast 2 Furious",
+      "original_title": "2 Fast 2 Furious",
+      "original_language": "en",
+      "poster_path": "/2f2f-poster.jpg",
+      "release_date": "2003-06-05",
+      "imdb_id": "tt0322259",
+      "images": {
+        "posters": [
+          {
+            "file_path": "/2f2f-poster.jpg",
+            "iso_639_1": "en",
+            "width": 500,
+            "height": 750,
+            "vote_average": 5.3,
+            "vote_count": 4
+          }
+        ],
+        "backdrops": [
+          {
+            "file_path": "/2f2f-text-backdrop.jpg",
+            "iso_639_1": "en",
+            "width": 1280,
+            "height": 720,
+            "vote_average": 5.3,
+            "vote_count": 4
+          },
+          {
+            "file_path": "/2f2f-backdrop.jpg",
+            "iso_639_1": null,
+            "width": 1920,
+            "height": 1080,
+            "vote_average": 5.3,
+            "vote_count": 4
+          },
+          {
+            "file_path": "/2f2f-backdrop-2.jpg",
+            "iso_639_1": null,
+            "width": 1280,
+            "height": 720,
+            "vote_average": 5.3,
+            "vote_count": 4
+          }
+        ],
+        "logos": [
+          {
+            "file_path": "/2f2f-logo.png",
+            "iso_639_1": "en",
+            "width": 800,
+            "height": 310,
+            "vote_average": 5.3,
+            "vote_count": 4
+          }
+        ]
+      }
+    }
+  }
+]

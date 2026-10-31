@@ -282,11 +282,18 @@ func (provider *Provider) applyImages(ctx context.Context, target *item.Item, re
 	add(item.ImageTypePrimary, primary)
 
 	if result.Images != nil {
+		// Only the first backdrop of each type attaches, so a replacing
+		// refresh keeps TMDb's top-ranked one instead of the last.
+		added := map[item.ImageType]bool{}
 		for _, backdrop := range result.Images.Backdrops {
 			kind := item.ImageTypeBackdrop
 			if adjustImageLanguage(backdrop.Iso6391, "") != "" {
 				kind = item.ImageTypeThumb
 			}
+			if added[kind] || backdrop.FilePath == "" {
+				continue
+			}
+			added[kind] = true
 			add(kind, backdrop)
 		}
 		if len(result.Images.Logos) > 0 {

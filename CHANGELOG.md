@@ -172,6 +172,11 @@ v0.3.0 is the first public alpha of Deadfin.
 - A user with access to only some libraries can open a person, genre or
   studio by its ID, as upstream does. Cast portraits returned 404 for these
   users. Lists keep the library restriction.
+- Remote images for a movie or series list TMDb's backdrops without text as
+  `Backdrop`, as Jellyfin does. The TMDb request carried the metadata
+  language, so TMDb returned only the backdrops with text, and Deadfin listed
+  them all as `Thumb`. A refresh that replaces all images keeps TMDb's first
+  backdrop, not its last (#783).
 
 ## [0.3.0-rc.3] - 2026-10-14
 
