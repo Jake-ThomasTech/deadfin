@@ -79,6 +79,11 @@ v0.3.0 is the first public alpha of Deadfin.
 
 ### Fixed
 
+- A MusicBrainz timeout or rate-limit wait no longer fails the whole artist
+  folder. When a remote metadata provider's own request deadline expires, the
+  item keeps its stored metadata, the scan logs one `remote metadata provider
+  failed` warning, and the folder stays `ok`. A cancelled scan still stops
+  (D-107, #749; regression of #367).
 - A library scan follows symbolic links, as upstream does. A linked media
   file or a linked directory, also one outside the library root, enters the
   library under the link path; before, the scan left every link out. A

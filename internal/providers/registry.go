@@ -191,7 +191,10 @@ func (r *Registry) run(ctx context.Context, refresh library.RefreshContext, targ
 			target.ImageInfos = images
 		}
 		if err != nil {
-			if stage != ProviderStageRemoteMetadata || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// Only the caller's own cancellation stops a remote stage. A
+			// provider's request timeout or rate-limit wait carries its own
+			// deadline and fails this provider for this item only (#749).
+			if stage != ProviderStageRemoteMetadata || ctx.Err() != nil {
 				return failures, fmt.Errorf("refresh provider %q: %w", provider.Name(), err)
 			}
 			failures++

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -212,12 +213,68 @@ func TestRegistryRemoteCancellationAndLocalErrorsPropagate(t *testing.T) {
 		t.Errorf("remote cancellation = %v, want context.Canceled", err)
 	}
 
+	// A provider whose own deadline fires while the caller cancels still
+	// aborts: the caller's cancellation wins.
+	callerCtx, callerCancel := context.WithCancel(t.Context())
+	callerGone := providers.NewRegistry(providerFunc{name: "remote", stage: providers.ProviderStageRemoteMetadata, refresh: func(context.Context, library.RefreshContext, *item.Item) (bool, error) {
+		callerCancel()
+		return false, context.DeadlineExceeded
+	}})
+	if err := callerGone.Refresh(callerCtx, remoteRefreshContext(), &item.Item{}); err == nil {
+		t.Error("provider deadline after caller cancellation = nil, want the stage aborted")
+	}
+
 	local := errors.New("nfo unreadable")
 	failingLocal := providers.NewRegistry(providerFunc{name: "nfo", stage: providers.ProviderStageLocalMetadata, refresh: func(context.Context, library.RefreshContext, *item.Item) (bool, error) {
 		return false, local
 	}})
 	if err := failingLocal.Refresh(t.Context(), remoteRefreshContext(), &item.Item{}); !errors.Is(err, local) {
 		t.Errorf("local error = %v, want it returned", err)
+	}
+}
+
+// TestRegistryRemoteProviderOwnDeadlineIsItemFailure covers #749: a remote
+// provider whose own request timeout or rate-limit wait expires, while the
+// caller's context is still live, fails for this item only. The registry logs
+// it, restores locked metadata, and runs the next provider.
+func TestRegistryRemoteProviderOwnDeadlineIsItemFailure(t *testing.T) {
+	for _, cause := range []error{
+		context.DeadlineExceeded,
+		fmt.Errorf("musicbrainz: release: %w", context.DeadlineExceeded),
+		context.Canceled,
+	} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			var logs bytes.Buffer
+			var calls []string
+			registry := providers.NewRegistry(
+				providerFunc{name: "MusicBrainz", stage: providers.ProviderStageRemoteMetadata, refresh: func(_ context.Context, _ library.RefreshContext, target *item.Item) (bool, error) {
+					calls = append(calls, "MusicBrainz")
+					target.Overview = providerString("partial")
+					return false, cause
+				}},
+				providerFunc{name: "TheAudioDB", stage: providers.ProviderStageRemoteMetadata, refresh: func(_ context.Context, _ library.RefreshContext, target *item.Item) (bool, error) {
+					calls = append(calls, "TheAudioDB")
+					target.ProviderIDs.Set("AudioDbAlbum", "1")
+					return true, nil
+				}},
+			).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+			target := item.Item{Kind: item.KindMusicAlbum, Overview: providerString("kept"), LockedFields: []item.MetadataField{item.MetadataFieldOverview}}
+			if err := registry.Refresh(t.Context(), remoteRefreshContext(), &target); err != nil {
+				t.Fatalf("Refresh = %v, want the provider's own deadline logged, not returned", err)
+			}
+			if want := []string{"MusicBrainz", "TheAudioDB"}; !reflect.DeepEqual(calls, want) {
+				t.Errorf("calls = %v, want %v", calls, want)
+			}
+			if target.Overview == nil || *target.Overview != "kept" {
+				t.Errorf("Overview = %v, want the locked value restored", target.Overview)
+			}
+			if id, _ := target.ProviderIDs.Get("AudioDbAlbum"); id != "1" {
+				t.Error("the provider after the failure did not enrich the item")
+			}
+			if !strings.Contains(logs.String(), "remote metadata provider failed") || !strings.Contains(logs.String(), "provider=MusicBrainz") {
+				t.Errorf("log = %q, want an item-level warning for MusicBrainz", logs.String())
+			}
+		})
 	}
 }
 
