@@ -822,10 +822,41 @@ func (s *ItemStore) dtoProjectionCounts(ctx context.Context, db queryer, ids []d
 	if err := closeRows(rows, rows.Err()); err != nil {
 		return err
 	}
+	if !recursive {
+		if err := s.linkedChildCounts(ctx, db, ids, out); err != nil {
+			return err
+		}
+	}
 	if err := s.seasonEpisodeCounts(ctx, db, ids, out); err != nil {
 		return err
 	}
 	return s.albumTrackCounts(ctx, db, ids, out)
+}
+
+// linkedChildCounts ports ItemCountService.GetChildCountBatch
+// (jellyfin@b04614e ItemCountService.cs:303-337), which DtoService reads only
+// for folders: a folder with linked children (a BoxSet or a Playlist) counts
+// its linked children, not its hierarchical children. A folder without linked
+// children keeps its hierarchical count.
+func (s *ItemStore) linkedChildCounts(ctx context.Context, db queryer, ids []dto.UUID, out map[dto.UUID]int) error {
+	marks, args := s.sourceIDArgs(ids)
+	rows, err := db.QueryContext(ctx, "SELECT linked.parent_item_id,COUNT(*) FROM linked_children AS linked JOIN items AS parent ON parent.id = linked.parent_item_id WHERE linked.parent_item_id IN ("+marks+") AND parent.is_folder = "+s.stores.Dialect().Boolean(true)+" GROUP BY linked.parent_item_id", args...)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var raw any
+		var count int
+		if err := rows.Scan(&raw, &count); err != nil {
+			return closeRows(rows, err)
+		}
+		id, err := scanUUID(raw)
+		if err != nil {
+			return closeRows(rows, err)
+		}
+		out[id] = count
+	}
+	return closeRows(rows, rows.Err())
 }
 
 // albumTrackCounts counts the tracks of each album in ids. A MusicAlbum's
