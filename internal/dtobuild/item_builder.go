@@ -3,11 +3,14 @@
 package dtobuild
 
 import (
+	"cmp"
 	"context"
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
+	"math"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 	"unicode/utf16"
@@ -599,9 +602,17 @@ func dtoPeopleOrEmpty(values []item.PersonCredit) []dto.BaseItemPerson {
 	return dtoPeople(values, nil)
 }
 
-// dtoPeople projects credits as DtoService.AttachPeople does: each person
+// dtoPeople projects credits as DtoService.AttachPeople does: credits sort by
+// SortOrder, then by person kind so actors come first, and each person
 // carries the tag and BlurHash of its Person entity's Primary image.
 func dtoPeople(values []item.PersonCredit, primaryImages map[dto.UUID]item.ImageInfo) []dto.BaseItemPerson {
+	values = slices.Clone(values)
+	slices.SortStableFunc(values, func(a, b item.PersonCredit) int {
+		if order := cmp.Compare(creditSortOrder(a), creditSortOrder(b)); order != 0 {
+			return order
+		}
+		return cmp.Compare(personKindRank(a.Type), personKindRank(b.Type))
+	})
 	result := make([]dto.BaseItemPerson, len(values))
 	for index, value := range values {
 		result[index] = dto.BaseItemPerson{ID: value.PersonID, Name: value.Name, Role: dereference(value.Role), Type: value.Type.String()}
@@ -619,6 +630,32 @@ func dtoPeople(values []item.PersonCredit, primaryImages map[dto.UUID]item.Image
 		}
 	}
 	return result
+}
+
+// creditSortOrder matches AttachPeople's i.SortOrder ?? int.MaxValue.
+func creditSortOrder(value item.PersonCredit) int {
+	if value.SortOrder == nil {
+		return math.MaxInt
+	}
+	return *value.SortOrder
+}
+
+// personKindRank matches the person-type rank in AttachPeople.
+func personKindRank(kind item.PersonKind) int {
+	switch kind {
+	case item.PersonKindActor:
+		return 0
+	case item.PersonKindGuestStar:
+		return 1
+	case item.PersonKindDirector:
+		return 2
+	case item.PersonKindWriter:
+		return 3
+	case item.PersonKindProducer, item.PersonKindComposer:
+		return 4
+	default:
+		return 10
+	}
 }
 
 func stringsOrEmpty(values []string) []string {
