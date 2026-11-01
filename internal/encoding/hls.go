@@ -36,6 +36,10 @@ type HLSJob struct {
 	// whatever the start point. StartOffsetTicks is then the exact input
 	// seek, inside the start GOP; the caller chooses it from the keyframes.
 	KeyframeCuts bool
+	// KeyframeStartTicks is the start of the start GOP of a keyframe-cut
+	// job. The audio of a restarted job starts there, like the copied video
+	// (deadfin#799).
+	KeyframeStartTicks int64
 	// PadAudioStart makes an audio transcode start at the job start with
 	// silence when the source audio stream starts later than the video
 	// (deadfin#681, D-82). Stream copy cannot pad, so it requires an audio
@@ -84,7 +88,7 @@ func BuildHLSArgs(job HLSJob, caps Capabilities) ([]string, error) {
 	if job.Live && encodingJob.OutputContainer == "ts" {
 		args = append(args, "-flags", "-global_header")
 	}
-	args = appendHLSAudioArgs(args, encodingJob, caps, job.PadAudioStart)
+	args = appendHLSAudioArgs(args, encodingJob, caps, job.PadAudioStart, hlsAudioStartTicks(job))
 	args = appendHLSTimestampArgs(args)
 	return appendHLSOutputArgs(args, job, caps), nil
 }
@@ -206,6 +210,15 @@ func appendHLSMapArgs(args []string, job EncodingJob) []string {
 // 7288-7400).
 func appendHLSInputArgs(args []string, job HLSJob, plan videoPlan) []string {
 	if job.StartOffsetTicks > 0 {
+		if job.KeyframeCuts {
+			// The input seek lands on the start keyframe, and the copied
+			// video starts there. Accurate seek would discard the decoded
+			// audio before the seek point, so a restarted job would leave an
+			// audio gap of up to 0.5 s at its first segment. Without it the
+			// audio starts at the keyframe on the frame grid of a job that
+			// played through (deadfin#799).
+			args = append(args, "-noaccurate_seek")
+		}
 		args = append(args, "-ss", formatTicks(hlsSeekTicks(job)))
 	}
 	// Stream copy regenerates missing presentation timestamps
@@ -439,7 +452,7 @@ func appendHLSTimestampArgs(args []string) []string {
 	return append(args, "-copyts", "-avoid_negative_ts", "disabled")
 }
 
-func appendHLSAudioArgs(args []string, job EncodingJob, caps Capabilities, padStart bool) []string {
+func appendHLSAudioArgs(args []string, job EncodingJob, caps Capabilities, padStart bool, startTicks int64) []string {
 	if job.AudioStream.Codec == "" {
 		return args
 	}
@@ -472,7 +485,7 @@ func appendHLSAudioArgs(args []string, job EncodingJob, caps Capabilities, padSt
 		filters = append(filters, filter)
 	}
 	if padStart {
-		filters = append(filters, hlsAudioStartPadFilter(job))
+		filters = append(filters, hlsAudioStartPadFilter(job, startTicks))
 	}
 	if len(filters) != 0 {
 		args = append(args, "-af", strings.Join(filters, ","))
@@ -484,13 +497,23 @@ func appendHLSAudioArgs(args []string, job EncodingJob, caps Capabilities, padSt
 // source audio frame with silence. The timestamps are the source timestamps
 // (-copyts), so first_pts is the job start in samples of the output rate.
 // async=1 also fills later gaps in the source track.
-func hlsAudioStartPadFilter(job EncodingJob) string {
+func hlsAudioStartPadFilter(job EncodingJob, startTicks int64) string {
 	rate := job.OutputAudioSampleRate
 	if rate <= 0 {
 		rate = hlsPadSampleRate
 	}
-	firstPTS := max(job.StartOffsetTicks, 0) * int64(rate) / 10_000_000
+	firstPTS := max(startTicks, 0) * int64(rate) / 10_000_000
 	return "aresample=osr=" + strconv.Itoa(rate) + ":async=1:first_pts=" + strconv.FormatInt(firstPTS, 10)
+}
+
+// hlsAudioStartTicks is the media time where the audio of the job starts: the
+// input seek, or the start GOP of a keyframe-cut job, which seeks without
+// accurate seek.
+func hlsAudioStartTicks(job HLSJob) int64 {
+	if job.KeyframeCuts && job.StartOffsetTicks > 0 {
+		return job.KeyframeStartTicks
+	}
+	return job.StartOffsetTicks
 }
 
 func appendHLSAudioBitstreamArgs(args []string, job EncodingJob, caps Capabilities, flag string) []string {

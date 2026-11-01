@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -32,6 +33,10 @@ type segmentCleanerOptions struct {
 	Clock         clock.Clock
 	Retention     time.Duration
 	SegmentLength time.Duration
+	// SegmentStarts is the media start of each segment file, by index, when
+	// the files do not follow SegmentLength (a keyframe-cut remux). Nil uses
+	// SegmentLength.
+	SegmentStarts []int64
 	State         func() segmentCleanerState
 	OpenDir       func(string) (segmentDirectory, error)
 }
@@ -100,6 +105,18 @@ func (cleaner *transcodingSegmentCleaner) clean(ctx context.Context, state segme
 		return nil
 	}
 	lastExpired := int((position - retention) / cleaner.options.SegmentLength)
+	if starts := cleaner.options.SegmentStarts; len(starts) != 0 {
+		// A file expires when it ends before the retention window. Its end
+		// is the start of the next file. The nominal length would expire
+		// files ahead of the player when the GOPs are longer than the
+		// segment length, and the player's next request would restart
+		// ffmpeg (deadfin#799).
+		cutoff := int64((position - retention) / 100)
+		lastExpired = sort.Search(len(starts), func(index int) bool { return starts[index] > cutoff }) - 2
+		if lastExpired < 0 {
+			return nil
+		}
+	}
 	base := filepath.Base(state.Path)
 	if extension := filepath.Ext(base); extension != "" {
 		base = base[:len(base)-len(extension)]

@@ -83,7 +83,7 @@ func (manager *TranscodeManager) startHLSSidecarsLocked(job *transcodeJob, stder
 		},
 		CacheBudget:        manager.options.CacheBytesPerSession,
 		FreeFloor:          manager.options.CacheFreeBytesFloor,
-		SegmentLengthTicks: int64(job.hls.segmentLength) * int64(time.Second/(100*time.Nanosecond)),
+		SegmentLengthTicks: job.hls.guardSegmentTicks(),
 		CacheBytes:         manager.familyCacheBytes(job.hls.playlist, job.hls.matches),
 		FreeBytes:          manager.transcodesFreeBytes,
 	})
@@ -92,6 +92,7 @@ func (manager *TranscodeManager) startHLSSidecarsLocked(job *transcodeJob, stder
 		Clock:         manager.options.Clock,
 		Retention:     manager.options.SegmentRetention,
 		SegmentLength: time.Duration(job.hls.segmentLength) * time.Second,
+		SegmentStarts: job.hls.segmentStarts,
 		State: func() segmentCleanerState {
 			manager.mu.Lock()
 			defer manager.mu.Unlock()

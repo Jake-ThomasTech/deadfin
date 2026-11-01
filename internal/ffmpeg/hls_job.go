@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,7 +52,13 @@ type HLSRequest struct {
 	// that joins the running job instead of restarting it. Zero uses the
 	// upstream 24/SegmentLengthSeconds (DynamicHlsController.GetDynamicSegment).
 	MaxForwardGap int
-	RunTimeTicks  int64
+	// SegmentStartTicks is the media start of each output file, by file
+	// index, when the files do not follow SegmentLengthSeconds: a
+	// keyframe-cut remux writes one file per source GOP (D-72). The segment
+	// cleaner, the cache pause guard, and the nominal download position then
+	// use these boundaries (deadfin#799). Nil uses SegmentLengthSeconds.
+	SegmentStartTicks []int64
+	RunTimeTicks      int64
 	// SourceRevision is the canonical identity of the media source. It must
 	// agree for every request that joins this playlist family.
 	SourceRevision string
@@ -95,6 +102,7 @@ type hlsJob struct {
 	deviceID                 string
 	segmentLength            int
 	maxForwardGap            int
+	segmentStarts            []int64
 	runTimeTicks             int64
 	startTimeTicks           int64
 	mediaSourceID            string
@@ -127,6 +135,11 @@ func (manager *TranscodeManager) validateHLSRequest(request HLSRequest) (*hlsJob
 	}
 	if request.MinSegments < 0 {
 		return nil, nil, errors.New("HLS minimum segment count cannot be negative")
+	}
+	for index, start := range request.SegmentStartTicks {
+		if start < 0 || index > 0 && start <= request.SegmentStartTicks[index-1] {
+			return nil, nil, errors.New("HLS segment start ticks must increase from zero or more")
+		}
 	}
 	if request.SourceRevision != "" && request.OpenSource == nil {
 		return nil, nil, errors.New("HLS source opener is required for a source revision")
@@ -212,6 +225,7 @@ func (manager *TranscodeManager) validateHLSRequest(request HLSRequest) (*hlsJob
 		mediaSourceID:            request.MediaSourceID,
 		segmentLength:            request.SegmentLengthSeconds,
 		maxForwardGap:            request.MaxForwardGap,
+		segmentStarts:            slices.Clone(request.SegmentStartTicks),
 		sourceRevision:           request.SourceRevision,
 		openSource:               request.OpenSource,
 		subtitleSource:           request.EmbeddedSubtitleSource,
@@ -757,7 +771,7 @@ func (reader *hlsSegmentReader) Close() error {
 		if reader.job.hls != nil {
 			end := reader.endTicks
 			if !reader.exactEnd {
-				end = nominalHLSSegmentEnd(reader.index, reader.job.hls.segmentLength)
+				end = reader.job.hls.segmentEnd(reader.index)
 			}
 			if end > reader.job.downloadPositionTicks {
 				reader.job.downloadPositionTicks = end
@@ -1280,6 +1294,29 @@ func (manager *TranscodeManager) unregisterHLSSessionLocked(job *transcodeJob) {
 func (manager *TranscodeManager) resetHLSIdleLocked(job *transcodeJob) {
 	manager.cancelIdleLocked(job)
 	manager.armIdleLocked(job)
+}
+
+// segmentEnd returns the media end of output file index.
+func (job *hlsJob) segmentEnd(index int) int64 {
+	if len(job.segmentStarts) == 0 || index < 0 {
+		return nominalHLSSegmentEnd(index, job.segmentLength)
+	}
+	if index+1 < len(job.segmentStarts) {
+		return job.segmentStarts[index+1]
+	}
+	return max(job.runTimeTicks, job.segmentStarts[len(job.segmentStarts)-1])
+}
+
+// guardSegmentTicks is the segment length that the cache pause guard keeps
+// written ahead of the player twice. A keyframe-cut segment joins whole GOPs,
+// so it can be one GOP longer than the requested length.
+func (job *hlsJob) guardSegmentTicks() int64 {
+	ticks := int64(job.segmentLength) * int64(time.Second/(100*time.Nanosecond))
+	longest := int64(0)
+	for index := 1; index < len(job.segmentStarts); index++ {
+		longest = max(longest, job.segmentStarts[index]-job.segmentStarts[index-1])
+	}
+	return saturatingTickAdd(ticks, longest)
 }
 
 func (job *hlsJob) segmentPath(index int) (string, error) {

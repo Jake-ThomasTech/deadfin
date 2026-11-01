@@ -164,6 +164,9 @@ func TestHLSServiceKeepsSegmentLengthCutsWithoutKeyframePlaylist(t *testing.T) {
 		if !hlsArgPair(manager.lastRestart.Args, "-hls_time", "6") || !equalInts(manager.waits, []int{1}) {
 			t.Errorf("MP4 remux argv = %q waits %v, want -hls_time 6 and segment file 1", manager.lastRestart.Args, manager.waits)
 		}
+		if got := manager.lastRestart.SegmentStartTicks; got != nil {
+			t.Errorf("SegmentStartTicks = %v, want nil for segment-length files", got)
+		}
 	})
 }
 
@@ -177,4 +180,34 @@ func equalInts(left, right []int) bool {
 		}
 	}
 	return true
+}
+
+// The manager gets the GOP boundaries of a keyframe-cut job, so its segment
+// cleaner expires files by GOP end, and a restart seeks without accurate seek
+// so its audio starts at the start keyframe (deadfin#799).
+func TestHLSServiceKeyframeRemuxPassesGOPBoundsToManager(t *testing.T) {
+	service, manager, request := hlsKeyframeRemux(t)
+	request.SegmentIndex = 2
+	request.RuntimeTicks = 130_000_000
+	response, err := service.Segment(t.Context(), request)
+	if err != nil {
+		t.Fatalf("Segment(2): %v", err)
+	}
+	_ = readHLSResponse(t, response)
+	job := manager.lastRestart
+	want := []int64{0, 30_000_000, 70_000_000, 90_000_000, 110_000_000, 130_000_000, 200_000_000, 202_000_000}
+	if len(job.SegmentStartTicks) != len(want) {
+		t.Fatalf("SegmentStartTicks = %v, want the keyframes %v", job.SegmentStartTicks, want)
+	}
+	for index := range want {
+		if job.SegmentStartTicks[index] != want[index] {
+			t.Fatalf("SegmentStartTicks = %v, want the keyframes %v", job.SegmentStartTicks, want)
+		}
+	}
+	if !hlsHasArg(job.Args, "-noaccurate_seek") {
+		t.Errorf("argv = %q, want -noaccurate_seek for a mid-file restart", job.Args)
+	}
+	if hlsHasArg(job.IdentityArgs, "-noaccurate_seek") {
+		t.Errorf("identity argv = %q, want no per-request seek options", job.IdentityArgs)
+	}
 }

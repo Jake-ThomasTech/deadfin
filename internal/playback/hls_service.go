@@ -88,9 +88,12 @@ type HLSJobRequest struct {
 	SegmentLengthSeconds     int
 	// MaxForwardGap overrides the manager's forward reuse window, in
 	// segment indexes. Zero keeps 24/SegmentLengthSeconds.
-	MaxForwardGap  int
-	RunTimeTicks   int64
-	StartTimeTicks int64
+	MaxForwardGap int
+	// SegmentStartTicks is the media start of each ffmpeg file, by file
+	// index, for a keyframe-cut remux. Nil means SegmentLengthSeconds files.
+	SegmentStartTicks []int64
+	RunTimeTicks      int64
+	StartTimeTicks    int64
 	// TranscodingInfo is the session projection of this rendition.
 	TranscodingInfo *dto.TranscodingInfo
 }
@@ -1449,6 +1452,11 @@ func (service *HLSService) managerRequest(prepared preparedHLS, live, seekSegmen
 	maxForwardGap := 0
 	if plan := prepared.keyframePlan; plan != nil && seekSegment {
 		job.StartNumber, job.StartOffsetTicks, startTimeTicks, maxForwardGap = hlsKeyframeRestart(*plan, prepared.request.SegmentIndex, int64PointerValue(prepared.source.RunTimeTicks))
+		job.KeyframeStartTicks = startTimeTicks
+	}
+	var segmentStartTicks []int64
+	if plan := prepared.keyframePlan; plan != nil {
+		segmentStartTicks = plan.KeyframeTicks
 	}
 	args, err := encoding.BuildHLSArgs(job, prepared.capabilities)
 	if err != nil {
@@ -1482,6 +1490,7 @@ func (service *HLSService) managerRequest(prepared preparedHLS, live, seekSegmen
 		},
 		SegmentLengthSeconds: prepared.request.SegmentLengthSeconds,
 		MaxForwardGap:        maxForwardGap,
+		SegmentStartTicks:    segmentStartTicks,
 		RunTimeTicks:         int64PointerValue(prepared.source.RunTimeTicks),
 		StartTimeTicks:       startTimeTicks,
 		TranscodingInfo:      hlsTranscodingInfo(prepared, job.EncodingJob),
