@@ -39,7 +39,7 @@ Deadfin normalizes.
    upstream in-memory landmine (divergence D-03; observable results identical).
 6. Satellite tables: `media_streams` (per-stream probe results, ~40 cols incl.
    HDR/DV fields), `media_attachments`, `chapters`, `people` + `people_map(role,
-   sort_order)`, `trickplay_info`, `keyframes`, `media_segments`, `users`,
+   sort_order, list_order)`, `trickplay_info`, `keyframes`, `media_segments`, `users`,
    `devices` (**token = device row**, upstream model kept), `api_keys`,
    `display_preferences`, `activity_log`, `libraries` (registry row per virtual
    folder; the filesystem `options.xml`/`.collection`/`.mblink` topology remains

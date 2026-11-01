@@ -53,10 +53,10 @@ func TestParseMovieLedgerMapsMetadataWithoutExternalWork(t *testing.T) {
 	assertProviderID(t, got, "Tmdb", "141052")
 
 	wantPeople := []nfo.Person{
-		{Name: "Zack Snyder", Kind: item.PersonKindDirector, Order: 0},
-		{Name: "Jerry Siegel", Kind: item.PersonKindWriter, Order: 1},
-		{Name: "Joe Shuster", Kind: item.PersonKindWriter, Order: 2},
-		{Name: "Ben Affleck", Role: stringPointer("Batman"), Kind: item.PersonKindActor, Order: 0},
+		{Name: "Zack Snyder", Kind: item.PersonKindDirector},
+		{Name: "Jerry Siegel", Kind: item.PersonKindWriter},
+		{Name: "Joe Shuster", Kind: item.PersonKindWriter},
+		{Name: "Ben Affleck", Role: stringPointer("Batman"), Kind: item.PersonKindActor, Order: intPointer(0)},
 	}
 	if !reflect.DeepEqual(got.People, wantPeople) {
 		t.Fatalf("parsed people = %#v, want %#v", got.People, wantPeople)
@@ -150,7 +150,7 @@ func TestParseTypeSpecificLedgerCases(t *testing.T) {
 				assertInt(t, "ProductionYear", got.Patch.ProductionYear, 1989)
 				assertProviderID(t, got, "MusicBrainzAlbum", "59b5a40b-e2fd-3f18-a218-e8c9aae12ab5")
 				assertProviderID(t, got, "MusicBrainzReleaseGroup", "6c301dbd-6ccb-3403-a6c4-6a22240a0297")
-				if want := []nfo.Person{{Name: "U2", Kind: item.PersonKindAlbumArtist, Order: 0}}; !reflect.DeepEqual(got.People, want) {
+				if want := []nfo.Person{{Name: "U2", Kind: item.PersonKindAlbumArtist}}; !reflect.DeepEqual(got.People, want) {
 					t.Fatalf("album artist credits = %#v, want %#v", got.People, want)
 				}
 			},
@@ -250,3 +250,4 @@ func assertDate(t *testing.T, field string, got *time.Time, want string) {
 }
 
 func stringPointer(value string) *string { return &value }
+func intPointer(value int) *int          { return &value }

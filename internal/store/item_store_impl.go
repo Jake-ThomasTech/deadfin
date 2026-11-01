@@ -142,11 +142,11 @@ func (s *ItemStore) replaceSatellites(ctx context.Context, tx *sql.Tx, it item.I
 			}
 		}
 	}
-	for _, person := range it.People {
+	for listOrder, person := range it.People {
 		if _, err := tx.ExecContext(ctx, "INSERT INTO people(id,name,clean_name) VALUES ("+s.placeholders(3)+") ON CONFLICT(id) DO UPDATE SET name=excluded.name, clean_name=excluded.clean_name", s.uuidArg(person.PersonID), person.Name, item.CleanName(person.Name)); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO people_map(item_id,person_id,role,type,sort_order) VALUES ("+s.placeholders(5)+")", s.uuidArg(it.ID), s.uuidArg(person.PersonID), person.Role, person.Type.String(), person.SortOrder); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO people_map(item_id,person_id,role,type,sort_order,list_order) VALUES ("+s.placeholders(6)+")", s.uuidArg(it.ID), s.uuidArg(person.PersonID), person.Role, person.Type.String(), person.SortOrder, listOrder); err != nil {
 			return err
 		}
 	}

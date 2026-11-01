@@ -208,7 +208,7 @@ func (s *ItemStore) batchItemValues(ctx context.Context, db queryer, marks strin
 }
 
 func (s *ItemStore) batchPeople(ctx context.Context, db queryer, marks string, args []any, byID map[dto.UUID]*item.Item) error {
-	rows, err := db.QueryContext(ctx, "SELECT m.item_id,m.person_id,p.name,m.role,m.type,m.sort_order FROM people_map m JOIN people p ON p.id=m.person_id WHERE m.item_id IN ("+marks+") ORDER BY m.item_id,m.sort_order NULLS LAST,m.person_id,m.type", args...)
+	rows, err := db.QueryContext(ctx, "SELECT m.item_id,m.person_id,p.name,m.role,m.type,m.sort_order FROM people_map m JOIN people p ON p.id=m.person_id WHERE m.item_id IN ("+marks+") ORDER BY m.item_id,m.sort_order NULLS LAST,m.list_order,m.person_id,m.type", args...)
 	if err != nil {
 		return err
 	}
@@ -393,7 +393,7 @@ func (s *ItemStore) itemValues(ctx context.Context, db queryer, id dto.UUID) (it
 }
 
 func (s *ItemStore) people(ctx context.Context, db queryer, id dto.UUID) ([]item.PersonCredit, error) {
-	rows, err := db.QueryContext(ctx, "SELECT m.person_id,p.name,m.role,m.type,m.sort_order FROM people_map m JOIN people p ON p.id=m.person_id WHERE m.item_id = "+s.ph(1)+" ORDER BY m.sort_order NULLS LAST,m.person_id,m.type", s.uuidArg(id))
+	rows, err := db.QueryContext(ctx, "SELECT m.person_id,p.name,m.role,m.type,m.sort_order FROM people_map m JOIN people p ON p.id=m.person_id WHERE m.item_id = "+s.ph(1)+" ORDER BY m.sort_order NULLS LAST,m.list_order,m.person_id,m.type", s.uuidArg(id))
 	if err != nil {
 		return nil, err
 	}

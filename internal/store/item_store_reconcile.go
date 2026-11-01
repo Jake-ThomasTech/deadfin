@@ -1021,25 +1021,18 @@ func reconcileStrings(values []string) []string {
 	return values
 }
 
+// reconcilePeople orders credits as the people read does: sort_order with
+// nil last, then list_order, which is the slice position.
 func reconcilePeople(values []item.PersonCredit) []item.PersonCredit {
 	if len(values) == 0 {
 		return nil
 	}
 	canonical := append([]item.PersonCredit(nil), values...)
-	sort.Slice(canonical, func(i, j int) bool {
-		if canonical[i].SortOrder == nil {
-			if canonical[j].SortOrder != nil {
-				return false
-			}
-		} else if canonical[j].SortOrder == nil {
-			return true
-		} else if *canonical[i].SortOrder != *canonical[j].SortOrder {
-			return *canonical[i].SortOrder < *canonical[j].SortOrder
+	sort.SliceStable(canonical, func(i, j int) bool {
+		if canonical[i].SortOrder == nil || canonical[j].SortOrder == nil {
+			return canonical[i].SortOrder != nil && canonical[j].SortOrder == nil
 		}
-		if canonical[i].PersonID != canonical[j].PersonID {
-			return canonical[i].PersonID.String() < canonical[j].PersonID.String()
-		}
-		return canonical[i].Type.String() < canonical[j].Type.String()
+		return *canonical[i].SortOrder < *canonical[j].SortOrder
 	})
 	return canonical
 }

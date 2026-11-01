@@ -368,8 +368,7 @@ func nfoPeople(people []nfo.Person) []item.PersonCredit {
 			continue
 		}
 		seen[key] = struct{}{}
-		order := person.Order
-		credits = append(credits, item.PersonCredit{PersonID: id, Name: person.Name, Role: person.Role, Type: person.Kind, SortOrder: &order})
+		credits = append(credits, item.PersonCredit{PersonID: id, Name: person.Name, Role: person.Role, Type: person.Kind, SortOrder: person.Order})
 	}
 	return credits
 }

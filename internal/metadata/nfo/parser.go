@@ -20,13 +20,14 @@ type ParseOptions struct {
 	Kind item.Kind
 }
 
-// Person is an NFO person credit. Order is the source order when the NFO does
-// not supply an explicit order.
+// Person is an NFO person credit. Order is the <order> or <sortorder> value of
+// an <actor> element (upstream GetPersonFromXmlNode). It is nil when the NFO
+// supplies no order; the credit then keeps its position in People.
 type Person struct {
 	Name  string
 	Role  *string
 	Kind  item.PersonKind
-	Order int
+	Order *int
 }
 
 // Result is the metadata parsed from one NFO document. Patch contains only
@@ -179,7 +180,7 @@ func parseElement(result *Result, kind item.Kind, node element) {
 		result.People = appendPeople(result.People, node, item.PersonKindWriter)
 	case "credits":
 		for _, person := range appendSplit(nil, value, "/") {
-			result.People = append(result.People, Person{Name: person, Kind: item.PersonKindWriter, Order: len(result.People)})
+			result.People = append(result.People, Person{Name: person, Kind: item.PersonKindWriter})
 		}
 	case "actor":
 		result.People = appendPeople(result.People, node, item.PersonKindActor)
@@ -381,16 +382,16 @@ func parseRating(patch *item.Item, node element) {
 
 func appendPeople(people []Person, node element, kind item.PersonKind) []Person {
 	name, role := normalized(node.Text), ""
-	order := len(people)
+	var order *int
 	for _, child := range node.Nodes {
 		switch strings.ToLower(child.XMLName.Local) {
 		case "name":
 			name = normalized(child.Text)
 		case "role":
 			role = normalized(child.Text)
-		case "order":
+		case "order", "sortorder":
 			if parsed, ok := integer(normalized(child.Text)); ok {
-				order = parsed
+				order = &parsed
 			}
 		}
 	}
