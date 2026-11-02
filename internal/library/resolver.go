@@ -179,6 +179,10 @@ type RefreshContext struct {
 	// first refresh, a required refresh, FullRefresh, or ReplaceAllMetadata.
 	// The zero value keeps the mode gate alone.
 	SkipRemoteMetadata bool
+	// SkipLocalMetadata suppresses the local metadata stage (NFO readers).
+	// Identify sets it: upstream MetadataService does not run local metadata
+	// providers when the refresh carries a SearchResult.
+	SkipLocalMetadata bool
 	// Ancestors is a copy of the target's ancestor identity facts, nearest
 	// first. Hierarchy-aware providers read the parent series from it, as
 	// upstream SeasonInfo/EpisodeInfo carry SeriesProviderIds and

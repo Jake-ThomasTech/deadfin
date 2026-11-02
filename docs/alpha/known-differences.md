@@ -22,8 +22,10 @@ real problem, report it anyway and tell us why.
   QuickConnect requests, and the server at most 256. Past that, new requests
   fail with "429" until old ones expire (10 minutes). Behind a proxy all
   clients share one address.
-- **Remote image downloads** accept only URLs that a metadata provider
-  returned for that item (D-27).
+- **Remote image downloads refuse local addresses** (D-27). "Download
+  image" accepts any http or https URL, but not one on your own network or
+  `localhost`, such as a NAS. The error names the reason. Upload the image
+  file instead.
 - **Media attachments** other than fonts and images download as files
   (D-64), for example an HTML or SVG attachment in an MKV file.
 

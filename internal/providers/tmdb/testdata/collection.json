@@ -1,0 +1,200 @@
+[
+  {
+    "method": "GET",
+    "url": "https://api.themoviedb.org/3/configuration",
+    "status": 200,
+    "header": {
+      "Cache-Control": [
+        "public, max-age=3600"
+      ],
+      "Content-Type": [
+        "application/json"
+      ]
+    },
+    "body": {
+      "images": {
+        "secure_base_url": "https://image.tmdb.org/t/p/"
+      }
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.themoviedb.org/3/collection/87118?language=en&include_image_language=en%2Cnull&append_to_response=images",
+    "status": 200,
+    "header": {
+      "Cache-Control": [
+        "public, max-age=3600"
+      ],
+      "Content-Type": [
+        "application/json"
+      ]
+    },
+    "body": {
+      "id": 87118,
+      "name": "Cars Collection",
+      "overview": "Animated films about racing cars.",
+      "poster_path": "/cars-poster.jpg",
+      "backdrop_path": "/cars-backdrop.jpg",
+      "parts": [
+        {
+          "id": 920,
+          "title": "Cars"
+        },
+        {
+          "id": 49013,
+          "title": "Cars 2"
+        }
+      ],
+      "images": {
+        "posters": [
+          {
+            "file_path": "/cars-poster.jpg",
+            "iso_639_1": "en",
+            "width": 1000,
+            "height": 1500,
+            "vote_average": 5.3,
+            "vote_count": 4
+          },
+          {
+            "file_path": "/cars-poster-2.jpg",
+            "iso_639_1": null,
+            "width": 800,
+            "height": 1200,
+            "vote_average": 5.1,
+            "vote_count": 2
+          }
+        ],
+        "backdrops": [
+          {
+            "file_path": "/cars-backdrop.jpg",
+            "iso_639_1": null,
+            "width": 1920,
+            "height": 1080,
+            "vote_average": 5.4,
+            "vote_count": 3
+          },
+          {
+            "file_path": "/cars-title.jpg",
+            "iso_639_1": "en",
+            "width": 1280,
+            "height": 720,
+            "vote_average": 5.2,
+            "vote_count": 1
+          }
+        ]
+      }
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.themoviedb.org/3/collection/87118?append_to_response=images",
+    "status": 200,
+    "header": {
+      "Cache-Control": [
+        "public, max-age=3600"
+      ],
+      "Content-Type": [
+        "application/json"
+      ]
+    },
+    "body": {
+      "id": 87118,
+      "name": "Cars Collection",
+      "overview": "Animated films about racing cars.",
+      "poster_path": "/cars-poster.jpg",
+      "backdrop_path": "/cars-backdrop.jpg",
+      "parts": [
+        {
+          "id": 920,
+          "title": "Cars"
+        },
+        {
+          "id": 49013,
+          "title": "Cars 2"
+        }
+      ],
+      "images": {
+        "posters": [
+          {
+            "file_path": "/cars-poster.jpg",
+            "iso_639_1": "en",
+            "width": 1000,
+            "height": 1500,
+            "vote_average": 5.3,
+            "vote_count": 4
+          },
+          {
+            "file_path": "/cars-poster-2.jpg",
+            "iso_639_1": null,
+            "width": 800,
+            "height": 1200,
+            "vote_average": 5.1,
+            "vote_count": 2
+          }
+        ],
+        "backdrops": [
+          {
+            "file_path": "/cars-backdrop.jpg",
+            "iso_639_1": null,
+            "width": 1920,
+            "height": 1080,
+            "vote_average": 5.4,
+            "vote_count": 3
+          },
+          {
+            "file_path": "/cars-title.jpg",
+            "iso_639_1": "en",
+            "width": 1280,
+            "height": 720,
+            "vote_average": 5.2,
+            "vote_count": 1
+          }
+        ]
+      }
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.themoviedb.org/3/search/collection?query=Cars+Collection&language=en",
+    "status": 200,
+    "header": {
+      "Cache-Control": [
+        "public, max-age=3600"
+      ],
+      "Content-Type": [
+        "application/json"
+      ]
+    },
+    "body": {
+      "page": 1,
+      "results": [
+        {
+          "id": 87118,
+          "name": "Cars Collection",
+          "poster_path": "/cars-poster.jpg"
+        }
+      ],
+      "total_pages": 1,
+      "total_results": 1
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.themoviedb.org/3/search/collection?query=No+Such+Collection&language=en",
+    "status": 200,
+    "header": {
+      "Cache-Control": [
+        "public, max-age=3600"
+      ],
+      "Content-Type": [
+        "application/json"
+      ]
+    },
+    "body": {
+      "page": 1,
+      "results": [],
+      "total_pages": 1,
+      "total_results": 0
+    }
+  }
+]

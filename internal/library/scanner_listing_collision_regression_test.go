@@ -3,6 +3,7 @@
 package library_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,6 +133,9 @@ func TestScannerKeepsFolderWithCaseCollidingEntries(t *testing.T) {
 					skip := filepath.Join(music, test.wantSkip)
 					if len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Error(), "skip item "+skip+":") {
 						t.Fatalf("scan %d errors = %v, want one skip of %q", pass, result.Errors, skip)
+					}
+					if !errors.Is(result.Errors[0], library.ErrItemSkipped) {
+						t.Fatalf("scan %d error %v does not match library.ErrItemSkipped", pass, result.Errors[0])
 					}
 				}
 				audio := 0

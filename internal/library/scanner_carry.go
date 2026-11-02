@@ -42,13 +42,28 @@ func carryStoredProviderIDs(candidate *item.Item, previous item.Item) {
 // fetch a remote image for a type the item already has. A provider URL
 // replaces a stored URL, because both name the provider's current artwork.
 // A local library image wins; a carried backdrop then moves to the next free
-// index. Nothing carries when the refresh replaces all images.
+// index.
+//
+// A refresh that replaces all images replaces an image only with one that a
+// provider supplies (ItemImageProvider.RefreshImages). A stored image then
+// carries only for a type the candidate lacks, and the dynamic image pass may
+// replace it. When the refresh also replaces all metadata, the images in the
+// internal metadata directory of the item do not carry
+// (ItemImageProvider.RemoveImages).
 func carryStoredImages(candidate *item.Item, previous item.Item, refresh RefreshOptions, libraryRoot string) {
-	if refresh.ReplaceAllImages && refresh.Image == RefreshModeFullRefresh {
-		return
+	replacing := refresh.ReplaceAllImages && refresh.Image == RefreshModeFullRefresh
+	var supplied map[item.ImageType]bool
+	if replacing {
+		supplied = make(map[item.ImageType]bool, len(candidate.ImageInfos))
+		for _, image := range candidate.ImageInfos {
+			supplied[image.Type] = true
+		}
 	}
 	for _, image := range previous.ImageInfos {
 		if !carriesStoredImage(image.Path, libraryRoot) || containsImagePath(candidate.ImageInfos, image) {
+			continue
+		}
+		if replacing && (supplied[image.Type] || refresh.ReplaceAllMetadata && inInternalMetadataDir(image.Path, previous.ID)) {
 			continue
 		}
 		position := imageAt(candidate.ImageInfos, image.Type, image.Index)
@@ -64,6 +79,16 @@ func carryStoredImages(candidate *item.Item, previous item.Item, refresh Refresh
 			candidate.ImageInfos = append(candidate.ImageInfos, image)
 		}
 	}
+}
+
+// metadataPathToken is the stored prefix of a file under the metadata root.
+const metadataPathToken = "%MetadataPath%"
+
+// inInternalMetadataDir reports an image path in the internal metadata
+// directory of the item (BaseItem.GetInternalMetadataPath).
+func inInternalMetadataDir(path string, id dto.UUID) bool {
+	directory := filepath.ToSlash(InternalMetadataDir(metadataPathToken, id)) + "/"
+	return strings.HasPrefix(filepath.ToSlash(path), directory)
 }
 
 func carriesStoredImage(path, libraryRoot string) bool {

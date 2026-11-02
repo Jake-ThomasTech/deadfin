@@ -101,8 +101,13 @@ func (r *Registry) RefreshWithOutcome(ctx context.Context, refresh library.Refre
 	if _, err := r.run(ctx, refresh, target, ProviderStageLocalImages, false); err != nil {
 		return library.RefreshOutcome{}, err
 	}
-	if _, err := r.run(ctx, refresh, target, ProviderStageLocalMetadata, true); err != nil {
-		return library.RefreshOutcome{}, err
+	// Identify skips the local metadata readers, so a stale NFO cannot put
+	// back the provider IDs the search result replaced (MetadataService.cs:
+	// 768-769).
+	if !refresh.SkipLocalMetadata {
+		if _, err := r.run(ctx, refresh, target, ProviderStageLocalMetadata, true); err != nil {
+			return library.RefreshOutcome{}, err
+		}
 	}
 	// LibraryOptions.EnableInternetProviders is obsolete upstream ("Disable
 	// remote providers in TypeOptions instead") and nothing reads it, so it

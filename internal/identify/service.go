@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 
 	"os"
 	"path/filepath"
@@ -270,6 +271,13 @@ func (s *Service) Apply(ctx context.Context, itemID dto.UUID, result providers.R
 	// 8. Restore DateCreated (the NFO adapter may have overwritten it).
 	target.DateCreated = originalDateCreated
 
+	// 9. Collapse duplicate credits and values, as the scanner does before
+	// it stores a plan. A remote result can credit one person twice with
+	// the same kind (two cast entries with one name, or Writer and
+	// Screenplay), which the people_map key rejects (#803). Upstream
+	// PeopleHelper.AddPerson merges such credits.
+	library.NormalizeItemLists(target)
+
 	// 10. Set DateLastRefreshed/DateLastSaved = now, keep DateCreated.
 	now := s.clock.Now()
 	target.DateLastRefreshed = &now
@@ -478,11 +486,10 @@ func (s *Service) RemoteImageProviders(ctx context.Context, itemID dto.UUID) ([]
 }
 
 // DownloadImage downloads a remote image and stores it on the item
-// (RemoteImageController.cs:130-160). The imageUrl must pass the provenance
-// check: it must match a provider-listed URL for this item or an existing
-// http(s) ImageInfo.Path already persisted on the item (§4, ring option 1).
-// Non-Backdrop replaces the existing index-0 entry of that type; Backdrop
-// appends at the next free index.
+// (RemoteImageController.cs:130-160). As in stock, any http(s) imageUrl is
+// accepted; the hardened downloader refuses special-purpose destinations and
+// bounds and validates the response (D-27). Non-Backdrop replaces the existing
+// index-0 entry of that type; Backdrop appends at the next free index.
 func (s *Service) DownloadImage(ctx context.Context, itemID dto.UUID, imageType item.ImageType, imageURL string) error {
 	// 404-check.
 	loaded, err := s.items.GetBatch(ctx, []dto.UUID{itemID})
@@ -494,19 +501,16 @@ func (s *Service) DownloadImage(ctx context.Context, itemID dto.UUID, imageType 
 	}
 	target := &loaded[0]
 
-	// Provenance check (authoritative): the imageUrl must match a provider-listed
-	// URL for this item, or an existing http(s) ImageInfo.Path already persisted.
-	if !s.isAllowedImageURL(ctx, target, imageURL) {
-		return ErrProvenanceRejected
+	if err := checkImageURL(imageURL); err != nil {
+		return err
 	}
 
-	// Fetch through the hardened downloader (ring security/remote-image-download@v1,
-	// option 1): HTTPS-only, dial-time rejection of non-global-unicast addresses on
-	// every redirect hop, response bounded and validated as image content. The
-	// validated bytes are then persisted via Store so a failed write persists
-	// nothing; the item's ImageInfo.Path stores the remote URL, which the image
-	// pipeline serves through the same cache (imageserve/service.go:212,
-	// handlers/images.go:286).
+	// Fetch through the hardened downloader: http(s) only, dial-time rejection
+	// of special-purpose addresses on every redirect hop, response bounded and
+	// validated as image content. The validated bytes are then persisted via
+	// Store so a failed write persists nothing; the item's ImageInfo.Path
+	// stores the remote URL, which the image pipeline serves through the same
+	// cache (imageserve/service.go:212, handlers/images.go:286).
 	if s.downloader == nil {
 		return imageserve.ErrRemoteUnavailable
 	}
@@ -532,45 +536,23 @@ func (s *Service) DownloadImage(ctx context.Context, itemID dto.UUID, imageType 
 	return nil
 }
 
-// ErrProvenanceRejected is returned when the imageUrl does not match any
-// provider-listed URL or existing persisted image path.
-var ErrProvenanceRejected = errors.New("identify: image URL not from a registered provider")
+// ErrInvalidImageURL is returned when the imageUrl is not an absolute http(s)
+// URL. The error text names the reason.
+var ErrInvalidImageURL = errors.New("invalid ImageUrl")
 
-// isAllowedImageURL checks the provenance: the URL must match a provider-listed
-// URL for this item (all providers, all languages, no type filter), or an
-// existing http(s) ImageInfo.Path already persisted on the item.
-func (s *Service) isAllowedImageURL(ctx context.Context, target *item.Item, imageURL string) bool {
+// checkImageURL accepts an absolute http(s) URL with a host.
+func checkImageURL(imageURL string) error {
+	if imageURL == "" {
+		return fmt.Errorf("%w: ImageUrl is required", ErrInvalidImageURL)
+	}
 	if !providers.IsAllowedImageURL(imageURL) {
-		return false
+		return fmt.Errorf("%w: ImageUrl must be an http or https URL", ErrInvalidImageURL)
 	}
-	// Check existing persisted http(s) image paths.
-	for _, info := range target.ImageInfos {
-		if info.Path == imageURL && (strings.HasPrefix(info.Path, "http://") || strings.HasPrefix(info.Path, "https://")) {
-			return true
-		}
+	parsed, err := url.Parse(imageURL)
+	if err != nil || parsed.Hostname() == "" {
+		return fmt.Errorf("%w: ImageUrl has no host", ErrInvalidImageURL)
 	}
-	// Check provider-listed URLs (all providers, all languages, no type filter).
-	if s.lookups == nil {
-		return false
-	}
-	listers := providers.FilteredListers(s.lookups.Listers(), target.Kind)
-	language := s.systemLanguage()
-	for _, lister := range listers {
-		images, err := lister.Images(ctx, providers.ImageLookup{
-			Kind:        target.Kind,
-			Language:    language,
-			ProviderIDs: providers.ItemToMap(target.ProviderIDs),
-		})
-		if err != nil {
-			continue
-		}
-		for _, img := range images {
-			if img.URL == imageURL || img.ThumbnailURL == imageURL {
-				return true
-			}
-		}
-	}
-	return false
+	return nil
 }
 
 // ExternalIDs returns the external-id descriptors for an item's kind
@@ -685,6 +667,10 @@ func (s *Service) buildRefreshContext(ctx context.Context, target *item.Item, op
 		Image:              library.RefreshModeFullRefresh,
 		ReplaceAllMetadata: true,
 		ReplaceAllImages:   replaceAllImages,
+		// Identify does not run local metadata providers
+		// (MetadataService.cs:768-769), so a stale NFO does not win
+		// over the chosen search result.
+		SkipLocalMetadata: true,
 	}, nil
 }
 

@@ -5,6 +5,7 @@ package tasks_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -238,6 +239,34 @@ func TestTrickplayTaskContinuesAfterItemErrorAndReportsCompletion(t *testing.T) 
 	}
 	if got, want := reporter.progress, []float64{50, 100}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("progress after failed item = %#v, want every candidate completion %#v", got, want)
+	}
+}
+
+// An item's own extraction deadline (#806) is an item failure, not the task's:
+// the task reports it and continues with the next item.
+func TestTrickplayTaskContinuesAfterItemDeadline(t *testing.T) {
+	first, second := trickplayCandidate(1), trickplayCandidate(2)
+	itemErr := fmt.Errorf("extract trickplay frames: %w", context.DeadlineExceeded)
+	generator := &trickplayGenerator{errFor: map[dto.UUID]error{first.ID: itemErr}}
+	reporter := &trickplayReporter{}
+	task := tasks.NewTrickplayTask(
+		trickplaySource{snapshot: &trickplaySnapshot{values: []tasks.Candidate{first, second}}},
+		generator,
+		reporter,
+		tasks.Options{Widths: []int{320}, TileWidth: 10, TileHeight: 10, IntervalMilliseconds: 10_000, Quality: 73},
+	)
+
+	if err := task.Execute(t.Context()); err != nil {
+		t.Fatalf("Execute after item deadline: %v", err)
+	}
+	if got := len(generator.generations); got != 2 {
+		t.Fatalf("generations = %d, want both candidates", got)
+	}
+	if got, want := reporter.itemErrors, []trickplayItemError{{candidate: first, err: itemErr}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reported item errors = %#v, want %#v", got, want)
+	}
+	if got, want := reporter.progress, []float64{50, 100}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("progress = %#v, want %#v", got, want)
 	}
 }
 

@@ -80,7 +80,7 @@ func TestFFmpegFrameExtractorReapsDescendantAfterLeaderExit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newFrameExtractorFixture(t, tc.exitCode, 320, 240)
-			extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path)
+			extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path, nil)
 			if err != nil {
 				t.Fatalf("NewFFmpegFrameExtractor(): %v", err)
 			}
@@ -98,7 +98,7 @@ func TestFFmpegFrameExtractorAcceptsCompletedFramesAfterWaitDelay(t *testing.T) 
 	}
 
 	fixture := newFrameExtractorFixture(t, "0", 320, 240)
-	extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path)
+	extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path, nil)
 	if err != nil {
 		t.Fatalf("NewFFmpegFrameExtractor(): %v", err)
 	}
@@ -137,7 +137,7 @@ func TestFFmpegFrameExtractorPreservesSlashRelativeExecutableAcrossSinkChdir(t *
 		}
 	})
 
-	extractor, err := trickplay.NewFFmpegFrameExtractor("./ffmpeg")
+	extractor, err := trickplay.NewFFmpegFrameExtractor("./ffmpeg", nil)
 	if err != nil {
 		t.Fatalf("NewFFmpegFrameExtractor(./ffmpeg): %v", err)
 	}
@@ -163,7 +163,7 @@ func TestFFmpegFrameExtractorPassesPinnedSourceThroughTrampoline(t *testing.T) {
 	source := openPinnedFrameSource(t, filepath.Join(t.TempDir(), "original.mkv"))
 	device, inode := source.Identity()
 	t.Setenv("FRAME_EXTRACTOR_EXPECTED_SOURCE_ID", fmt.Sprintf("%d:%d", device, inode))
-	extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path)
+	extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path, nil)
 	if err != nil {
 		t.Fatalf("NewFFmpegFrameExtractor(): %v", err)
 	}
@@ -231,7 +231,7 @@ func TestFFmpegFrameExtractorUsesSourceRateAndDisplayAspectFilter(t *testing.T) 
 	const intervalMilliseconds = int64(1_500)
 	rate := float32(29.97)
 	fixture := newFrameExtractorFixture(t, "0", 320, 240)
-	extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path)
+	extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path, nil)
 	if err != nil {
 		t.Fatalf("NewFFmpegFrameExtractor(): %v", err)
 	}
@@ -284,7 +284,7 @@ func TestFFmpegFrameExtractorScalesAnamorphicDisplayAspect(t *testing.T) {
 		t.Skipf("real FFmpeg extractor smoke requires mpeg4 encoding: %v\n%s", err, output)
 	}
 
-	extractor, err := trickplay.NewFFmpegFrameExtractor(ffmpegPath)
+	extractor, err := trickplay.NewFFmpegFrameExtractor(ffmpegPath, nil)
 	if err != nil {
 		t.Fatalf("NewFFmpegFrameExtractor(%q): %v", ffmpegPath, err)
 	}
@@ -315,7 +315,7 @@ func TestFFmpegFrameExtractorDoesNotWaitPastCallerDeadlineForExitedLeader(t *tes
 	fixture := newFrameExtractorFixture(t, "0", 320, 240)
 	releaseFile := filepath.Join(filepath.Dir(fixture.pidFile), "deadline-release")
 	readyFile := fixture.enableDeadlineReadiness(t, releaseFile)
-	extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path)
+	extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path, nil)
 	if err != nil {
 		t.Fatalf("NewFFmpegFrameExtractor(): %v", err)
 	}
@@ -380,7 +380,7 @@ func TestFFmpegFrameExtractorPinsOutputDirectoryAcrossAncestorReplacement(t *tes
 	t.Setenv("FRAME_EXTRACTOR_SINK_READY", ready)
 	t.Setenv("FRAME_EXTRACTOR_SINK_RELEASE", release)
 
-	extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path)
+	extractor, err := trickplay.NewFFmpegFrameExtractor(fixture.path, nil)
 	if err != nil {
 		t.Fatalf("NewFFmpegFrameExtractor(): %v", err)
 	}

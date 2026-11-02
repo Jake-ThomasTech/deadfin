@@ -16,12 +16,14 @@ import (
 	"github.com/deadfin-org/deadfin/internal/clock"
 	"github.com/deadfin-org/deadfin/internal/config"
 	"github.com/deadfin-org/deadfin/internal/dto"
+	"github.com/deadfin-org/deadfin/internal/item"
 	"github.com/deadfin-org/deadfin/internal/jfimport"
 	"github.com/deadfin-org/deadfin/internal/library"
 	"github.com/deadfin-org/deadfin/internal/naming"
 	"github.com/deadfin-org/deadfin/internal/playlists"
 	"github.com/deadfin-org/deadfin/internal/store"
 	"github.com/deadfin-org/deadfin/internal/store/jellyfinsource"
+	"github.com/deadfin-org/deadfin/internal/trickplay"
 )
 
 // importJellyfin runs the one-way Jellyfin import (D3). It reads a copy of
@@ -117,6 +119,7 @@ func runImportJellyfin(ctx context.Context, out io.Writer, programData, database
 			}
 		}()
 		options.Collections = collectionImporter{scanner: scanner, items: items}
+		options.Trickplay = trickplayImporter{items: items}
 	}
 	report, err := jfimport.Run(ctx, src, identity, items, options)
 	printImportReport(out, report, dryRun)
@@ -150,6 +153,7 @@ func printImportReport(out io.Writer, report jfimport.Report, dryRun bool) {
 	}
 	fmt.Fprintf(out, "collections: %d imported; members: %d matched, %d not found in Deadfin\n", report.CollectionsImported, report.CollectionEntriesMatched, report.CollectionEntriesUnmatched)
 	fmt.Fprintf(out, "playlists: %d imported, %d already present, %d skipped; entries: %d matched, %d not found in Deadfin\n", report.PlaylistsImported, report.PlaylistsExisting, report.PlaylistsSkipped, report.PlaylistEntriesMatched, report.PlaylistEntriesUnmatched)
+	fmt.Fprintf(out, "trickplay: %d imported, %d already present, %d without tiles saved with the media, %d for items not found in Deadfin\n", report.TrickplayImported, report.TrickplayExisting, report.TrickplayNotWithMedia, report.TrickplayUnmatched)
 	for _, warning := range report.Warnings {
 		fmt.Fprintf(out, "warning: %s\n", warning)
 	}
@@ -233,20 +237,185 @@ func (u identityUsers) Get(ctx context.Context, id dto.UUID) (store.User, error)
 	return u.identity.User(ctx, id)
 }
 
-// collectionImporter creates or finds a collection by name and links its
-// members.
+// collectionImporter creates or finds a collection by name, links its
+// members, and keeps its provider IDs and images.
 type collectionImporter struct {
 	scanner *library.Scanner
 	items   *store.ItemStore
 }
 
-func (c collectionImporter) ImportCollection(ctx context.Context, name string, children []dto.UUID) error {
-	collection, err := c.scanner.CreateCollection(ctx, name, false)
+func (c collectionImporter) ImportCollection(ctx context.Context, value jfimport.CollectionImport) ([]string, error) {
+	collection, err := c.scanner.CreateCollection(ctx, value.Name, false)
+	if err != nil {
+		return nil, err
+	}
+	warnings, changed := keepCollectionMetadata(&collection, value)
+	if changed {
+		if err := c.items.Upsert(ctx, collection); err != nil {
+			return warnings, fmt.Errorf("store collection metadata: %w", err)
+		}
+	}
+	if len(value.Children) == 0 {
+		return warnings, nil
+	}
+	return warnings, c.items.AddToCollection(ctx, collection.ID, value.Children)
+}
+
+// collectionImageName returns the local image file name a scan reads for
+// imageType (Jellyfin's local image names), or false for a type that has
+// none.
+func collectionImageName(imageType item.ImageType) (string, bool) {
+	switch imageType {
+	case item.ImageTypePrimary:
+		return "poster", true
+	case item.ImageTypeArt:
+		return "clearart", true
+	case item.ImageTypeBackdrop:
+		return "backdrop", true
+	case item.ImageTypeBanner:
+		return "banner", true
+	case item.ImageTypeLogo:
+		return "logo", true
+	case item.ImageTypeThumb:
+		return "landscape", true
+	case item.ImageTypeDisc:
+		return "disc", true
+	default:
+		return "", false
+	}
+}
+
+// keepCollectionMetadata adds the Jellyfin provider IDs the collection does
+// not have, and keeps the Jellyfin images. An image file is copied into the
+// collection directory under its local image name, so later scans keep it;
+// an image URL is stored as a remote image. A type that the collection has
+// already is not changed, so a rerun changes nothing. It reports whether
+// collection changed, and a warning for each image it could not keep.
+func keepCollectionMetadata(collection *item.Item, value jfimport.CollectionImport) ([]string, bool) {
+	changed := false
+	names := make([]string, 0, len(value.ProviderIDs))
+	for name := range value.ProviderIDs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if _, found := collection.ProviderIDs.Get(name); !found {
+			collection.ProviderIDs.Set(name, value.ProviderIDs[name])
+			changed = true
+		}
+	}
+	var warnings []string
+	backdrops := 0
+	for _, image := range value.Images {
+		imageType := item.ImageType(image.Type)
+		base, supported := collectionImageName(imageType)
+		if !supported || image.Type < 0 || image.Type > int(item.ImageTypeProfile) {
+			warnings = append(warnings, fmt.Sprintf("collection %q: image %s: unsupported image type %d; skipped", value.Name, image.Path, image.Type))
+			continue
+		}
+		if imageType == item.ImageTypeBackdrop {
+			if backdrops > 0 {
+				base = fmt.Sprintf("backdrop%d", backdrops)
+			}
+			backdrops++
+		} else if collectionHasImage(*collection, imageType) {
+			continue
+		}
+		if strings.HasPrefix(image.Path, "http://") || strings.HasPrefix(image.Path, "https://") {
+			if !collectionHasImage(*collection, imageType) {
+				collection.ImageInfos = append(collection.ImageInfos, item.ImageInfo{Type: imageType, Path: image.Path})
+				changed = true
+			}
+			continue
+		}
+		if collection.Path == nil {
+			continue
+		}
+		target := filepath.Join(*collection.Path, base+strings.ToLower(filepath.Ext(image.Path)))
+		if _, err := os.Stat(target); err == nil {
+			continue
+		}
+		if err := copyFile(image.Path, target); err != nil {
+			warnings = append(warnings, fmt.Sprintf("collection %q: image %s: %v; skipped", value.Name, image.Path, err))
+			continue
+		}
+		collection.ImageInfos = append(collection.ImageInfos, item.ImageInfo{Type: imageType, Path: target})
+		changed = true
+	}
+	return warnings, changed
+}
+
+func collectionHasImage(collection item.Item, imageType item.ImageType) bool {
+	for _, image := range collection.ImageInfos {
+		if image.Type == imageType {
+			return true
+		}
+	}
+	return false
+}
+
+// copyFile copies source to a new file at target.
+func copyFile(source, target string) (err error) {
+	in, err := os.Open(source)
 	if err != nil {
 		return err
 	}
-	if len(children) == 0 {
-		return nil
+	defer in.Close()
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
 	}
-	return c.items.AddToCollection(ctx, collection.ID, children)
+	defer func() {
+		if closeErr := out.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = os.Remove(target)
+		}
+	}()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+// trickplayImporter persists a Jellyfin trickplay rendition whose tiles are
+// saved with the media, where the trickplay reader finds them. The row keeps
+// Jellyfin's exact interval and thumbnail count.
+type trickplayImporter struct{ items *store.ItemStore }
+
+func (i trickplayImporter) ImportTrickplay(ctx context.Context, itemID dto.UUID, info jellyfinsource.TrickplayInfo) (jfimport.TrickplayImportResult, error) {
+	persisted, err := i.items.Trickplays(ctx, itemID)
+	if err != nil {
+		return 0, err
+	}
+	for _, value := range persisted {
+		if value.Width == info.Width {
+			return jfimport.TrickplayExisting, nil
+		}
+	}
+	snapshot, err := i.items.DerivedSourceSnapshot(ctx, itemID)
+	if err != nil {
+		return 0, err
+	}
+	if snapshot.Path == nil || snapshot.SourceRevision == "" {
+		return jfimport.TrickplayNotWithMedia, nil
+	}
+	present, err := trickplay.MediaResolutionHasTiles(*snapshot.Path, info.Width, info.TileWidth, info.TileHeight)
+	if err != nil {
+		return 0, err
+	}
+	if !present {
+		return jfimport.TrickplayNotWithMedia, nil
+	}
+	token, err := discoveredTrickplayToken()
+	if err != nil {
+		return 0, err
+	}
+	if err := i.items.ReplaceTrickplay(ctx, store.TrickplayInfo{
+		ItemID: itemID, SourceRevision: snapshot.SourceRevision, Width: info.Width, Height: info.Height,
+		TileWidth: info.TileWidth, TileHeight: info.TileHeight, ThumbnailCount: info.ThumbnailCount,
+		IntervalMS: int64(info.Interval), Bandwidth: int64(info.Bandwidth), GenerationToken: token,
+	}); err != nil {
+		return 0, err
+	}
+	return jfimport.TrickplayImported, nil
 }

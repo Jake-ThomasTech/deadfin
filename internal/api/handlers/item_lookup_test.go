@@ -4,8 +4,11 @@ package handlers_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -212,20 +215,55 @@ func TestRemoteImages404BeforeWork(t *testing.T) {
 	}
 }
 
-// TestDownloadProvenanceRejectedReturns400 verifies an unlisted imageUrl
-// returns 400 via the provenance check, not 500 (P1 download-boundary). The
-// service returns the exact identify.ErrProvenanceRejected sentinel the
-// handler matches via errors.Is.
-func TestDownloadProvenanceRejectedReturns400(t *testing.T) {
+// TestDownloadErrorsCarryReason verifies each download failure maps to its
+// status and names the reason in the body (#809).
+func TestDownloadErrorsCarryReason(t *testing.T) {
 	id, _ := dto.ParseUUID(itemLookupID)
 	reader := &fakeItemReader{items: []item.Item{{ID: id, Kind: item.KindMovie}}}
-	service := &fakeRemoteImagesService{downloadErr: identify.ErrProvenanceRejected}
+	for _, tc := range []struct {
+		name     string
+		query    string
+		err      error
+		status   int
+		wantBody string
+	}{
+		{"missing type", "imageUrl=https://example.com/x.png", nil, http.StatusBadRequest, "Type is required"},
+		{"bad type", "type=Nope&imageUrl=https://example.com/x.png", nil, http.StatusBadRequest, "Type is not a valid ImageType"},
+		{"invalid url", "type=Primary&imageUrl=poster.jpg", fmt.Errorf("%w: ImageUrl must be an http or https URL", identify.ErrInvalidImageURL), http.StatusBadRequest, "ImageUrl must be an http or https URL\n"},
+		{"refused address", "type=Primary&imageUrl=https://internal.example/x.png", fmt.Errorf("identify: download image: %w", &url.Error{Op: "Get", URL: "https://internal.example/x.png", Err: fmt.Errorf("dial tcp 10.0.0.1:443: %w: special-purpose address 10.0.0.1", identify.ErrImageRefused)}), http.StatusBadRequest, "ImageUrl was refused: special-purpose address 10.0.0.1\n"},
+		{"fetch failure", "type=Primary&imageUrl=https://example.com/x.png", errors.New("identify: download image: remote image: status 404"), http.StatusInternalServerError, "Image download failed: identify: download image: remote image: status 404"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &fakeRemoteImagesService{downloadErr: tc.err}
+			rt := newRemoteImagesRouter(reader, service)
+			req := httptest.NewRequest(http.MethodPost, "/Items/"+itemLookupID+"/RemoteImages/Download?"+tc.query, nil)
+			rec := httptest.NewRecorder()
+			rt.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.status)
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantBody) {
+				t.Errorf("body = %q, want it to contain %q", rec.Body.String(), tc.wantBody)
+			}
+		})
+	}
+}
+
+// TestDownloadAnyURLReturns204 verifies the handler passes any imageUrl to
+// the service and returns 204 on success, as in stock (#809).
+func TestDownloadAnyURLReturns204(t *testing.T) {
+	id, _ := dto.ParseUUID(itemLookupID)
+	reader := &fakeItemReader{items: []item.Item{{ID: id, Kind: item.KindSeries}}}
+	service := &fakeRemoteImagesService{}
 	rt := newRemoteImagesRouter(reader, service)
-	req := httptest.NewRequest(http.MethodPost, "/Items/"+itemLookupID+"/RemoteImages/Download?type=Primary&imageUrl=https://evil.example/x.png", nil)
+	req := httptest.NewRequest(http.MethodPost, "/Items/"+itemLookupID+"/RemoteImages/Download?type=Primary&imageUrl=https://artworks.example.com/banners/posters/257942-1.jpg", nil)
 	rec := httptest.NewRecorder()
 	rt.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("unlisted URL status = %d, want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	if service.downloadCalls != 1 {
+		t.Errorf("DownloadImage calls = %d, want 1", service.downloadCalls)
 	}
 }
 

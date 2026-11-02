@@ -400,6 +400,68 @@ func TestRefreshDynamicImagesSavesAndSkips(t *testing.T) {
 		}
 	})
 
+	t.Run("replace all images keeps only the images this refresh supplied", func(t *testing.T) {
+		extractor := &recordingImageExtractor{}
+		providers := NewDynamicImages(DynamicImagesOptions{Extractor: extractor, MetadataPath: metadata})
+		replace := input
+		replace.Image, replace.ReplaceAllImages = library.RefreshModeFullRefresh, true
+		replace.Supplied = []item.ImageType{item.ImageTypePrimary}
+		supplied := newItem(item.KindMovie)
+		supplied.ImageInfos = []item.ImageInfo{{Type: item.ImageTypePrimary, Path: "https://image.tmdb.org/t/p/original/new.jpg"}}
+		if err := providers.RefreshDynamicImages(t.Context(), replace, &supplied); err != nil {
+			t.Fatal(err)
+		}
+		if len(extractor.jobs) != 0 {
+			t.Fatalf("jobs = %+v, want none for a supplied primary", extractor.jobs)
+		}
+		// A carried remote image that no provider supplied again is
+		// replaced (ItemImageProvider.RefreshImages downloadedImages).
+		replace.Supplied = nil
+		carried := newItem(item.KindMovie)
+		carried.ImageInfos = []item.ImageInfo{{Type: item.ImageTypePrimary, Path: "https://image.tmdb.org/t/p/original/old.jpg"}}
+		if err := providers.RefreshDynamicImages(t.Context(), replace, &carried); err != nil {
+			t.Fatal(err)
+		}
+		if len(extractor.jobs) != 1 || isRemoteImagePath(carried.ImageInfos[0].Path) {
+			t.Fatalf("jobs = %d images = %+v, want the carried primary replaced", len(extractor.jobs), carried.ImageInfos)
+		}
+	})
+
+	t.Run("changed only runs the Image Extractor for a track without a primary", func(t *testing.T) {
+		extractor := &recordingImageExtractor{}
+		providers := NewDynamicImages(DynamicImagesOptions{Extractor: extractor, MetadataPath: metadata})
+		changed := library.DynamicImageInput{
+			Image:       library.RefreshModeDefault,
+			ChangedOnly: true,
+			Streams:     []playback.MediaStream{{Type: playback.StreamTypeAudio, Index: 0}, {Type: playback.StreamTypeEmbeddedImage, Index: 1}},
+		}
+		track := newItem(item.KindAudio)
+		if !providers.DynamicImagesChanged(track) {
+			t.Fatal("DynamicImagesChanged(track without a primary) = false, want true")
+		}
+		if err := providers.RefreshDynamicImages(t.Context(), changed, &track); err != nil {
+			t.Fatal(err)
+		}
+		if len(extractor.jobs) != 1 || !hasImageType(track.ImageInfos, item.ImageTypePrimary) {
+			t.Fatalf("jobs = %d images = %+v, want the embedded cover", len(extractor.jobs), track.ImageInfos)
+		}
+		if providers.DynamicImagesChanged(track) {
+			t.Fatal("DynamicImagesChanged(track with a primary) = true, want false")
+		}
+		if err := providers.RefreshDynamicImages(t.Context(), changed, &track); err != nil || len(extractor.jobs) != 1 {
+			t.Fatalf("second pass = %v with %d jobs, want no more work", err, len(extractor.jobs))
+		}
+		movie := newItem(item.KindMovie)
+		if providers.DynamicImagesChanged(movie) {
+			t.Fatal("DynamicImagesChanged(movie) = true, want false: video providers have no change monitor")
+		}
+		changedVideo := input
+		changedVideo.ChangedOnly = true
+		if err := providers.RefreshDynamicImages(t.Context(), changedVideo, &movie); err != nil || len(extractor.jobs) != 1 {
+			t.Fatalf("changed-only movie refresh = %v with %d jobs, want no work", err, len(extractor.jobs))
+		}
+	})
+
 	t.Run("a provider failure is logged and does not fail the refresh", func(t *testing.T) {
 		extractor := &recordingImageExtractor{err: errors.New("ffmpeg failed")}
 		providers := NewDynamicImages(DynamicImagesOptions{Extractor: extractor, MetadataPath: metadata})

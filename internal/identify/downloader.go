@@ -4,6 +4,7 @@ package identify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -19,7 +20,7 @@ import (
 
 // Downloader is the byte-oriented fetch seam for remote image downloads
 // (ring security/remote-image-download@v1, option 1). Implementations enforce
-// transport hardening: HTTPS-only, dial-time rejection of non-global-unicast
+// transport hardening: http(s) only, dial-time rejection of non-global-unicast
 // addresses on every redirect hop, response bounded, and validated as image
 // content.
 type Downloader interface {
@@ -31,16 +32,21 @@ type Downloader interface {
 // provider from exhausting memory.
 const MaxRemoteImageBytes = 32 << 20
 
-// HardenedDownloader adapts a hardened HTTPS transport to the Downloader seam.
-// It enforces the transport hardening that defense-in-depth requires: scheme
-// must be https (provider CDNs are https-only today); the dialer Control hook
-// rejects any connection to a non-global-unicast address (loopback, private,
-// link-local, multicast, unspecified) so every redirect hop is re-validated at
-// dial time; HTTPS-to-HTTP redirects are rejected so a downgrade cannot bypass
-// the dial-time address check; the response is bounded by MaxRemoteImageBytes
-// and must be 2xx with an image/* Content-Type, with the upstream octet-stream
-// fallback that derives the type from the URL-path extension
-// (ProviderManager.cs:227-236).
+// ErrImageRefused marks a download that the hardened downloader refused: a
+// scheme other than http(s), a special-purpose destination address, a body
+// over MaxRemoteImageBytes, or a response that is not an image. The wrapping
+// error text names the reason.
+var ErrImageRefused = errors.New("remote image refused")
+
+// HardenedDownloader adapts a hardened HTTP transport to the Downloader seam
+// (D-27). It enforces the transport hardening that defense-in-depth requires:
+// scheme must be http or https, as in stock; the transport uses no proxy, and
+// the dialer Control hook rejects any connection to a non-global-unicast
+// address (loopback, private, link-local, multicast, unspecified), so every
+// redirect hop is re-validated at dial time; the response is bounded by
+// MaxRemoteImageBytes and must be 2xx with an image/* Content-Type, with the
+// upstream octet-stream fallback that derives the type from the URL-path
+// extension (ProviderManager.cs:227-236).
 type HardenedDownloader struct{ client *http.Client }
 
 // NewHardenedDownloader builds a Downloader with a hardened HTTP client.
@@ -48,7 +54,7 @@ func NewHardenedDownloader(timeout time.Duration) HardenedDownloader {
 	return HardenedDownloader{client: newHardenedImageClient(timeout)}
 }
 
-// Fetch downloads and validates a remote image. The URL must be HTTPS; every
+// Fetch downloads and validates a remote image. The URL must be http(s); every
 // redirect hop is re-validated for scheme and destination address. The response
 // body must be 2xx, bounded by MaxRemoteImageBytes, and have an image content
 // type (with the octet-stream/extension fallback).
@@ -57,8 +63,8 @@ func (d HardenedDownloader) Fetch(ctx context.Context, imageURL string) ([]byte,
 	if err != nil {
 		return nil, fmt.Errorf("remote image: invalid url: %w", err)
 	}
-	if strings.ToLower(parsed.Scheme) != "https" {
-		return nil, fmt.Errorf("remote image: scheme must be https, got %q", parsed.Scheme)
+	if !isHTTPScheme(parsed.Scheme) {
+		return nil, fmt.Errorf("%w: scheme must be http or https, got %q", ErrImageRefused, parsed.Scheme)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
 	if err != nil {
@@ -77,10 +83,10 @@ func (d HardenedDownloader) Fetch(ctx context.Context, imageURL string) ([]byte,
 		return nil, fmt.Errorf("remote image: read body: %w", err)
 	}
 	if len(body) > MaxRemoteImageBytes {
-		return nil, fmt.Errorf("remote image: body exceeds %d bytes", MaxRemoteImageBytes)
+		return nil, fmt.Errorf("%w: body exceeds %d bytes", ErrImageRefused, MaxRemoteImageBytes)
 	}
 	if !IsImageContentType(response.Header.Get("Content-Type"), response.Request.URL.Path) {
-		return nil, fmt.Errorf("remote image: not an image content type")
+		return nil, fmt.Errorf("%w: response is not an image", ErrImageRefused)
 	}
 	return body, nil
 }
@@ -105,12 +111,18 @@ func IsImageContentType(contentType, urlPath string) bool {
 	return false
 }
 
+// isHTTPScheme reports whether scheme is http or https.
+func isHTTPScheme(scheme string) bool {
+	scheme = strings.ToLower(scheme)
+	return scheme == "http" || scheme == "https"
+}
+
 // newHardenedImageClient builds an *http.Client whose dialer rejects any
 // connection to a non-global-unicast address, so every redirect hop is
-// re-validated at dial time. The CheckRedirect hook also rejects any redirect
-// whose scheme is not HTTPS, preventing a downgrade from HTTPS to HTTP that
-// would bypass the dial-time address validation. The redirect count is capped
-// at Go's default 10.
+// re-validated at dial time. The transport has no proxy, so the dial-time
+// check sees the real destination for http and https alike. The CheckRedirect
+// hook rejects any redirect whose scheme is not http(s). The redirect count is
+// capped at Go's default 10.
 func newHardenedImageClient(timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{Timeout: 30 * time.Second, Control: rejectNonGlobalUnicast}
 	return &http.Client{
@@ -123,8 +135,8 @@ func newHardenedImageClient(timeout time.Duration) *http.Client {
 			if len(via) >= 10 {
 				return fmt.Errorf("remote image: stopped after 10 redirects")
 			}
-			if strings.ToLower(req.URL.Scheme) != "https" {
-				return fmt.Errorf("remote image: refused redirect to non-https scheme %q", req.URL.Scheme)
+			if !isHTTPScheme(req.URL.Scheme) {
+				return fmt.Errorf("%w: redirect to scheme %q", ErrImageRefused, req.URL.Scheme)
 			}
 			return nil
 		},
@@ -186,7 +198,7 @@ func rejectNonGlobalUnicast(network, address string, _ syscall.RawConn) error {
 		return err
 	}
 	if isDeniedAddr(parsed) {
-		return fmt.Errorf("remote image: refused special-purpose address %s", host)
+		return fmt.Errorf("%w: special-purpose address %s", ErrImageRefused, host)
 	}
 	return nil
 }

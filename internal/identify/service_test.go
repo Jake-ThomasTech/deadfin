@@ -5,8 +5,10 @@ package identify
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -326,44 +328,113 @@ func TestDownloadBackdropAssignsNextFreeIndex(t *testing.T) {
 	}
 }
 
-// TestDownloadProvenanceRejectsUnlisted verifies an unlisted URL is rejected.
-func TestDownloadProvenanceRejectsUnlisted(t *testing.T) {
+// TestDownloadAcceptsUnlistedURL verifies a URL that no provider listed for
+// the item is downloaded and set, as in stock (#809). The item has no
+// provider IDs and the registry has no listers.
+func TestDownloadAcceptsUnlistedURL(t *testing.T) {
 	items := setupTestItems(t)
-	movie := &item.Item{
-		ID:          mustUUID("aabbccddeeff00112233445566778899"),
-		Kind:        item.KindMovie,
-		Name:        ptr("Movie"),
-		ProviderIDs: newProviderIDs("Tmdb", "1"),
+	series := &item.Item{
+		ID:   mustUUID("aabbccddeeff00112233445566778899"),
+		Kind: item.KindSeries,
+		Name: ptr("TableTop"),
 	}
-	if err := items.Upsert(context.Background(), *movie); err != nil {
+	if err := items.Upsert(context.Background(), *series); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-
-	lister := fakeImageLister{
-		name:  "TheMovieDb",
-		kind:  item.KindMovie,
-		types: []item.ImageType{item.ImageTypePrimary},
-		images: []providers.RemoteImageInfo{
-			{URL: "https://cdn.example.com/poster.jpg", Type: item.ImageTypePrimary},
-		},
-	}
-	lookups := providers.NewLookupRegistry(nil, []providers.ImageLister{lister})
 	remoteStore := &fakeRemoteStore{}
-
 	svc := New(Options{
 		Items:      items,
-		Lookups:    lookups,
+		Lookups:    providers.NewLookupRegistry(nil, nil),
 		Downloader: fakeDownloader{body: []byte("img")},
 		Remote:     remoteStore,
 		Clock:      clock.NewFake(identifyTestInstant()),
 	})
 
-	err := svc.DownloadImage(context.Background(), movie.ID, item.ImageTypePrimary, "https://evil.example.com/img.jpg")
-	if !errors.Is(err, ErrProvenanceRejected) {
-		t.Fatalf("DownloadImage(unlisted) err = %v, want ErrProvenanceRejected", err)
+	const imageURL = "http://artworks.example.com/banners/posters/257942-1.jpg"
+	if err := svc.DownloadImage(context.Background(), series.ID, item.ImageTypePrimary, imageURL); err != nil {
+		t.Fatalf("DownloadImage(unlisted) err = %v, want nil", err)
+	}
+	if !remoteStore.stored {
+		t.Error("remote store was not written")
+	}
+	loaded, err := items.GetBatch(context.Background(), []dto.UUID{series.ID})
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	var primary string
+	for _, info := range loaded[0].ImageInfos {
+		if info.Type == item.ImageTypePrimary {
+			primary = info.Path
+		}
+	}
+	if primary != imageURL {
+		t.Errorf("Primary path = %q, want %q", primary, imageURL)
+	}
+}
+
+// TestDownloadRejectsInvalidURL verifies a missing, non-http(s), or hostless
+// imageUrl fails with ErrInvalidImageURL and a reason, before any fetch.
+func TestDownloadRejectsInvalidURL(t *testing.T) {
+	items := setupTestItems(t)
+	movie := &item.Item{
+		ID:   mustUUID("aabbccddeeff00112233445566778899"),
+		Kind: item.KindMovie,
+		Name: ptr("Movie"),
+	}
+	if err := items.Upsert(context.Background(), *movie); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	remoteStore := &fakeRemoteStore{}
+	svc := New(Options{
+		Items:      items,
+		Downloader: fakeDownloader{body: []byte("img")},
+		Remote:     remoteStore,
+		Clock:      clock.NewFake(identifyTestInstant()),
+	})
+
+	for raw, reason := range map[string]string{
+		"":                       "ImageUrl is required",
+		"file:///etc/passwd":     "must be an http or https URL",
+		"poster.jpg":             "must be an http or https URL",
+		"https:///no-host.jpg":   "has no host",
+		"ftp://example.com/x.jp": "must be an http or https URL",
+	} {
+		err := svc.DownloadImage(context.Background(), movie.ID, item.ImageTypePrimary, raw)
+		if !errors.Is(err, ErrInvalidImageURL) || !strings.Contains(err.Error(), reason) {
+			t.Errorf("DownloadImage(%q) err = %v, want ErrInvalidImageURL with %q", raw, err, reason)
+		}
 	}
 	if remoteStore.stored {
 		t.Error("remote store was written for a rejected URL")
+	}
+}
+
+// TestDownloadRefusedKeepsReason verifies a downloader refusal keeps the
+// ErrImageRefused identity through DownloadImage, and nothing is stored.
+func TestDownloadRefusedKeepsReason(t *testing.T) {
+	items := setupTestItems(t)
+	movie := &item.Item{
+		ID:   mustUUID("aabbccddeeff00112233445566778899"),
+		Kind: item.KindMovie,
+		Name: ptr("Movie"),
+	}
+	if err := items.Upsert(context.Background(), *movie); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	remoteStore := &fakeRemoteStore{}
+	refusal := fmt.Errorf("%w: special-purpose address 10.0.0.1", ErrImageRefused)
+	svc := New(Options{
+		Items:      items,
+		Downloader: fakeDownloader{err: refusal},
+		Remote:     remoteStore,
+		Clock:      clock.NewFake(identifyTestInstant()),
+	})
+	err := svc.DownloadImage(context.Background(), movie.ID, item.ImageTypePrimary, "https://internal.example/x.jpg")
+	if !errors.Is(err, ErrImageRefused) || !strings.Contains(err.Error(), "special-purpose address") {
+		t.Fatalf("DownloadImage err = %v, want ErrImageRefused with reason", err)
+	}
+	if remoteStore.stored {
+		t.Error("remote store was written for a refused download")
 	}
 }
 

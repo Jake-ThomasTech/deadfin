@@ -314,9 +314,9 @@ func TestRunImportsPlaylists(t *testing.T) {
 
 type fakeCollections map[string][]dto.UUID
 
-func (f fakeCollections) ImportCollection(_ context.Context, name string, children []dto.UUID) error {
-	f[name] = append(f[name], children...)
-	return nil
+func (f fakeCollections) ImportCollection(_ context.Context, collection jfimport.CollectionImport) ([]string, error) {
+	f[collection.Name] = append(f[collection.Name], collection.Children...)
+	return nil, nil
 }
 
 func TestRunImportsCollections(t *testing.T) {

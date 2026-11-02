@@ -64,6 +64,11 @@ type Candidate struct {
 	ExtractDuringScan   bool
 	RegenerateTrickplay bool
 	ExistingWidths      []int
+	// Discover reports that the item's library saves trickplay with the
+	// media (SaveTrickplayWithMedia). Before it generates, the task
+	// catalogues the existing media-side trickplay, as upstream
+	// TrickplayManager.RefreshTrickplayDataAsync does when it does not replace.
+	Discover bool
 }
 
 // Candidates is the stable result set used for one task execution.
@@ -92,6 +97,13 @@ type Generation struct {
 // Generator creates one requested trickplay resolution.
 type Generator interface {
 	Generate(context.Context, Generation) error
+}
+
+// Discoverer persists trickplay saved with the media of a candidate and
+// returns the widths it added. A Generator that also implements Discoverer is
+// asked to discover before it generates.
+type Discoverer interface {
+	Discover(context.Context, Candidate) ([]int, error)
 }
 
 // Reporter receives task progress and item-level generation failures.
@@ -230,6 +242,7 @@ func (task *Task) execute(ctx context.Context, scanScope bool, progress func(flo
 			_, requested := regenerations[candidate.ID]
 			if scanScope && !candidate.ExtractDuringScan {
 				candidate.Generate = false
+				candidate.Discover = false
 				requested = false
 			}
 			if !hasCompleteSourceFingerprint(candidate) {
@@ -257,7 +270,23 @@ func (task *Task) execute(ctx context.Context, scanScope bool, progress func(flo
 }
 
 func (task *Task) generateCandidate(ctx context.Context, candidate Candidate) error {
-	if !candidate.Generate || !hasCompleteSourceFingerprint(candidate) {
+	if !hasCompleteSourceFingerprint(candidate) {
+		return nil
+	}
+	if discoverer, ok := task.generator.(Discoverer); ok && candidate.Discover && !candidate.RegenerateTrickplay {
+		widths, err := discoverer.Discover(ctx, candidate)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			task.reportItemError(candidate, err)
+			return nil
+		}
+		if len(widths) != 0 {
+			candidate.ExistingWidths = append(append([]int(nil), candidate.ExistingWidths...), widths...)
+		}
+	}
+	if !candidate.Generate {
 		return nil
 	}
 
@@ -294,8 +323,11 @@ func (task *Task) generateCandidate(ctx context.Context, candidate Candidate) er
 		if err == nil {
 			continue
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
+		// Only the task's own cancellation stops the task. An item that
+		// fails, also by its own extraction deadline, is reported and the
+		// task continues, as upstream TrickplayImagesTask does.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 		task.reportItemError(candidate, err)
 	}

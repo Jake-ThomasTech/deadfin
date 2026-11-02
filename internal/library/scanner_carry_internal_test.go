@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/deadfin-org/deadfin/internal/dto"
 	"github.com/deadfin-org/deadfin/internal/item"
 )
 
@@ -17,6 +18,12 @@ func TestCarryStoredImagesCollisions(t *testing.T) {
 	libraryPoster := root + "/Movie/poster.jpg"
 	libraryFanart := root + "/Movie/fanart.jpg"
 	uploadBackdrop := "%MetadataPath%/library/ab/abc/backdrop-1c2d.jpg"
+	storedID, err := dto.ParseUUID("9c3f1d0e7b2a4c5d8e6f0a1b2c3d4e5f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownUpload := "%MetadataPath%/library/9c/9c3f1d0e7b2a4c5d8e6f0a1b2c3d4e5f/poster-0a1b.jpg"
+	replaceImages := RefreshOptions{Metadata: RefreshModeFullRefresh, Image: RefreshModeFullRefresh, ReplaceAllImages: true}
 	tests := []struct {
 		name      string
 		candidate []item.ImageInfo
@@ -49,16 +56,26 @@ func TestCarryStoredImagesCollisions(t *testing.T) {
 			[]item.ImageInfo{{Type: item.ImageTypePrimary, Path: libraryPoster}},
 			DefaultRefreshOptions(),
 			nil},
-		{"replace all images carries nothing",
+		{"replace all images keeps a type no provider supplied",
 			nil,
+			[]item.ImageInfo{{Type: item.ImageTypePrimary, Path: storedURL}, {Type: item.ImageTypeBackdrop, Path: uploadBackdrop}},
+			replaceImages,
+			[]item.ImageInfo{{Type: item.ImageTypePrimary, Path: storedURL}, {Type: item.ImageTypeBackdrop, Path: uploadBackdrop}}},
+		{"replace all images takes the supplied image",
+			[]item.ImageInfo{{Type: item.ImageTypePrimary, Path: providerURL}},
 			[]item.ImageInfo{{Type: item.ImageTypePrimary, Path: upload}},
-			RefreshOptions{Metadata: RefreshModeFullRefresh, Image: RefreshModeFullRefresh, ReplaceAllImages: true},
-			nil},
+			replaceImages,
+			[]item.ImageInfo{{Type: item.ImageTypePrimary, Path: providerURL}}},
+		{"replace all metadata and images removes internal metadata images",
+			nil,
+			[]item.ImageInfo{{Type: item.ImageTypePrimary, Path: ownUpload}, {Type: item.ImageTypeLogo, Path: storedURL}},
+			RefreshOptions{Metadata: RefreshModeFullRefresh, Image: RefreshModeFullRefresh, ReplaceAllMetadata: true, ReplaceAllImages: true},
+			[]item.ImageInfo{{Type: item.ImageTypeLogo, Path: storedURL}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			candidate := item.Item{ImageInfos: test.candidate}
-			carryStoredImages(&candidate, item.Item{ImageInfos: test.stored}, test.refresh, root)
+			carryStoredImages(&candidate, item.Item{ID: storedID, ImageInfos: test.stored}, test.refresh, root)
 			if !reflect.DeepEqual(candidate.ImageInfos, test.want) {
 				t.Fatalf("images = %#v, want %#v", candidate.ImageInfos, test.want)
 			}

@@ -25,8 +25,12 @@ import (
 // original item no longer exists (the 10.11 retention migration).
 var PlaceholderItemID = dto.UUID{15: 1}
 
-// Source is an open, read-only Jellyfin database.
-type Source struct{ db *sql.DB }
+// Source is an open, read-only Jellyfin database. path is the database file;
+// it locates Jellyfin's data and metadata directories for virtual paths.
+type Source struct {
+	db   *sql.DB
+	path string
+}
 
 // Open opens path read-only. The import guide requires a copy made while
 // Jellyfin is stopped, so the file does not change during the import. Open
@@ -46,7 +50,7 @@ func Open(ctx context.Context, path string) (*Source, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("jellyfinsource: open %s: %w", path, err)
 	}
-	return &Source{db: db}, nil
+	return &Source{db: db, path: path}, nil
 }
 
 // Close closes the database.

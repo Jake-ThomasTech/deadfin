@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +42,18 @@ type Container struct {
 	ChildPaths []string
 	// UnresolvedChildren counts entries whose item has no path in Jellyfin.
 	UnresolvedChildren int
+	// ProviderIDs holds the item's BaseItemProviders rows by provider name.
+	ProviderIDs map[string]string
+	// Images holds the item's BaseItemImageInfos rows, in Jellyfin order.
+	Images []Image
+}
+
+// Image is one Jellyfin image of an item. Type is the ImageInfoImageType
+// value, which is also the ImageType value. Path is a file path, with
+// Jellyfin's %AppDataPath% and %MetadataPath% expanded, or a URL.
+type Image struct {
+	Type int
+	Path string
 }
 
 // containerData is the part of BaseItems.Data the importer needs. Jellyfin
@@ -131,9 +144,87 @@ func (s *Source) Containers(ctx context.Context, typeName string) ([]Container, 
 		if err != nil {
 			return nil, err
 		}
+		if err := s.itemProviders(ctx, &c); err != nil {
+			return nil, err
+		}
+		if err := s.itemImages(ctx, &c); err != nil {
+			return nil, err
+		}
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// itemProviders reads the BaseItemProviders rows of c. A database without
+// the table has no provider IDs.
+func (s *Source) itemProviders(ctx context.Context, c *Container) error {
+	exists, err := s.hasTable(ctx, "BaseItemProviders")
+	if err != nil || !exists {
+		return err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT ProviderId, ProviderValue FROM BaseItemProviders WHERE ItemId = ? ORDER BY ProviderId`, sourceGUID(c.ID))
+	if err != nil {
+		return fmt.Errorf("jellyfinsource: read provider ids of %q: %w", c.Name, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, value string
+		if err := rows.Scan(&name, &value); err != nil {
+			return fmt.Errorf("jellyfinsource: scan provider id of %q: %w", c.Name, err)
+		}
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		if c.ProviderIDs == nil {
+			c.ProviderIDs = map[string]string{}
+		}
+		c.ProviderIDs[name] = value
+	}
+	return rows.Err()
+}
+
+// itemImages reads the BaseItemImageInfos rows of c. A database without the
+// table has no images.
+func (s *Source) itemImages(ctx context.Context, c *Container) error {
+	exists, err := s.hasTable(ctx, "BaseItemImageInfos")
+	if err != nil || !exists {
+		return err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT ImageType, COALESCE(Path,'') FROM BaseItemImageInfos WHERE ItemId = ? ORDER BY ImageType, Id`, sourceGUID(c.ID))
+	if err != nil {
+		return fmt.Errorf("jellyfinsource: read images of %q: %w", c.Name, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var image Image
+		if err := rows.Scan(&image.Type, &image.Path); err != nil {
+			return fmt.Errorf("jellyfinsource: scan image of %q: %w", c.Name, err)
+		}
+		if strings.TrimSpace(image.Path) == "" {
+			continue
+		}
+		image.Path = s.expandVirtualPath(image.Path)
+		c.Images = append(c.Images, image)
+	}
+	return rows.Err()
+}
+
+// expandVirtualPath ports IServerApplicationHost.ExpandVirtualPath for the
+// %AppDataPath% and %MetadataPath% prefixes. Jellyfin keeps jellyfin.db in
+// its data directory, and the metadata directory is a sibling of it, so the
+// database copy must sit in a copy of the data directory for the paths to
+// resolve.
+func (s *Source) expandVirtualPath(path string) string {
+	data := filepath.Dir(s.path)
+	for prefix, root := range map[string]string{
+		"%AppDataPath%":  data,
+		"%MetadataPath%": filepath.Join(filepath.Dir(data), "metadata"),
+	} {
+		if rest, ok := strings.CutPrefix(path, prefix); ok {
+			return filepath.Join(root, filepath.FromSlash(rest))
+		}
+	}
+	return path
 }
 
 func (s *Source) hasTable(ctx context.Context, name string) (bool, error) {

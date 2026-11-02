@@ -732,8 +732,8 @@ func hasTextBurn(job EncodingJob) bool {
 
 // planIntelQSV ports GetIntelVidFilterChain and
 // GetIntelQsvVaapiVidFiltersPrefered (EncodingHelper.cs:4409-4455,
-// 4747-5007). Deinterlace, transpose, and MJPEG branches are not used by
-// the HLS H.264 path.
+// 4747-5007). Deinterlace and transpose branches are not used. The MJPEG
+// branches serve trickplay extraction.
 func planIntelQSV(plan *videoPlan, job EncodingJob, caps Capabilities, decoder []string, software softwareFilter) {
 	stream := job.VideoStream
 	options := job.Hardware
@@ -743,6 +743,7 @@ func planIntelQSV(plan *videoPlan, job EncodingJob, caps Capabilities, decoder [
 	isSwDecoder := !isHwDecoder
 	isQsvEncoder := strings.Contains(plan.encoder, "qsv")
 	isSwEncoder := !isQsvEncoder
+	isMjpegEncoder := strings.Contains(plan.encoder, "mjpeg")
 	isIntelVaapiOclSupported := isVaapiSupported(stream, caps) && caps.hasHWAccel("qsv") && caps.isOpenclFullSupported()
 
 	if (isSwDecoder && isSwEncoder) || !isIntelVaapiOclSupported || !caps.hasFilter("alphasrc") {
@@ -765,7 +766,7 @@ func planIntelQSV(plan *videoPlan, job EncodingJob, caps Capabilities, decoder [
 		} else if hasGraphicalSubs {
 			outFormat = "yuv420p"
 		}
-		main = append(main, swScaleFilter(job), "format="+outFormat)
+		main = append(main, mjpegSwScaleFilter(job, isMjpegEncoder && !doOclTonemap), "format="+outFormat)
 		if doOclTonemap {
 			main = append(main, "hwupload=derive_device=opencl")
 		}
@@ -782,6 +783,18 @@ func planIntelQSV(plan *videoPlan, job EncodingJob, caps Capabilities, decoder [
 			}
 		}
 		scale := hwScaleFilter(prefix, suffix, outFormat, stream, width, height)
+		if scale != "" && isMjpegEncoder {
+			// _minFFmpegQsvVppOutRangeOption and _minFFmpegQsvVppScaleModeOption.
+			doVppFullRangeOut := caps.versionAtLeast(7, 0, 1)
+			if !(isQsvDecoder && !doVppFullRangeOut) && !doOclTonemap {
+				scale += ":out_range=pc"
+			}
+			if !isQsvDecoder {
+				scale += ":mode=hq"
+			} else if caps.versionAtLeast(6, 0, 0) {
+				scale += ":scale_mode=hq"
+			}
+		}
 		if scale != "" && isVaapiDecoder {
 			scale += ":extra_hw_frames=24"
 		}
@@ -801,7 +814,7 @@ func planIntelQSV(plan *videoPlan, job EncodingJob, caps Capabilities, decoder [
 		main = append(main, "hwmap=derive_device=opencl:mode=read")
 	}
 	if doOclTonemap {
-		main = append(main, openclTonemapFilter(options, caps))
+		main = append(main, openclTonemapFilter(fullRangeTonemap(options, isMjpegEncoder), caps))
 	}
 
 	memoryOutput := false
@@ -851,6 +864,7 @@ func planIntelVAAPI(plan *videoPlan, job EncodingJob, caps Capabilities, decoder
 	isVaapiEncoder := strings.Contains(plan.encoder, "vaapi")
 	isSwDecoder := !isVaapiDecoder
 	isSwEncoder := !isVaapiEncoder
+	isMjpegEncoder := strings.Contains(plan.encoder, "mjpeg")
 	isVaapiOclSupported := isVaapiSupported(stream, caps) && caps.isVaapiFullSupported() && caps.isOpenclFullSupported()
 
 	if (isSwDecoder && isSwEncoder) || !isVaapiOclSupported || !caps.hasFilter("alphasrc") {
@@ -880,7 +894,7 @@ func planIntelVAAPI(plan *videoPlan, job EncodingJob, caps Capabilities, decoder
 		if doOclTonemap {
 			outFormat = "yuv420p10le"
 		}
-		main = append(main, swScaleFilter(job), "format="+outFormat)
+		main = append(main, mjpegSwScaleFilter(job, isMjpegEncoder && !doOclTonemap), "format="+outFormat)
 		if doOclTonemap {
 			main = append(main, "hwupload=derive_device=opencl")
 		}
@@ -893,6 +907,12 @@ func planIntelVAAPI(plan *videoPlan, job EncodingJob, caps Capabilities, decoder
 			}
 		}
 		scale := hwScaleFilter("scale", "vaapi", outFormat, stream, width, height)
+		if scale != "" && isMjpegEncoder {
+			if !doOclTonemap {
+				scale += ":out_range=pc"
+			}
+			scale += ":mode=hq"
+		}
 		if scale != "" {
 			scale += ":extra_hw_frames=24"
 		}
@@ -905,7 +925,7 @@ func planIntelVAAPI(plan *videoPlan, job EncodingJob, caps Capabilities, decoder
 		main = append(main, "hwmap=derive_device=opencl:mode=read")
 	}
 	if doOclTonemap {
-		main = append(main, openclTonemapFilter(options, caps))
+		main = append(main, openclTonemapFilter(fullRangeTonemap(options, isMjpegEncoder), caps))
 	}
 	if doOclTonemap && isVaInVaOut {
 		main = append(main, "hwmap=derive_device=vaapi:mode=write:reverse=1", "format=vaapi")
@@ -956,6 +976,7 @@ func planNvidia(plan *videoPlan, job EncodingJob, caps Capabilities, decoder []s
 	isSwDecoder := len(decoder) == 0
 	isNvencEncoder := strings.Contains(plan.encoder, "nvenc")
 	isSwEncoder := !isNvencEncoder
+	isMjpegEncoder := strings.Contains(plan.encoder, "mjpeg")
 
 	if (isSwDecoder && isSwEncoder) || !caps.isCudaFullSupported() || !caps.hasFilter("alphasrc") {
 		softwareFallback(plan, software, !isSwDecoder)
@@ -975,7 +996,7 @@ func planNvidia(plan *videoPlan, job EncodingJob, caps Capabilities, decoder []s
 		if doCuTonemap {
 			outFormat = "p010le"
 		}
-		main = append(main, swScaleFilter(job), "format="+outFormat)
+		main = append(main, mjpegSwScaleFilter(job, false), "format="+outFormat)
 		if doCuTonemap {
 			main = append(main, "hwupload=derive_device=cuda")
 		}
@@ -991,7 +1012,7 @@ func planNvidia(plan *videoPlan, job EncodingJob, caps Capabilities, decoder []s
 		main = append(main, hwScaleFilter("scale", "cuda", outFormat, stream, width, height))
 	}
 	if doCuTonemap {
-		main = append(main, hwTonemapFilter("cuda", "yuv420p", job.Hardware, caps))
+		main = append(main, hwTonemapFilter("cuda", "yuv420p", fullRangeTonemap(job.Hardware, isMjpegEncoder), caps))
 	}
 
 	memoryOutput := false
@@ -1074,6 +1095,30 @@ func overwriteColorProperties(stream VideoStream, tonemap bool) string {
 		return "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc"
 	}
 	return "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc"
+}
+
+// mjpegSwScaleFilter is swScaleFilter with GetSwScaleFilter's maximum-width
+// form for image extraction, and full range output for a hardware MJPEG
+// encoder ("sw decoder + hw mjpeg encoder").
+func mjpegSwScaleFilter(job EncodingJob, fullRange bool) string {
+	filter := swScaleFilter(job)
+	if job.MaxWidth > 0 {
+		filter = TrickplayScaleFilter(job.MaxWidth)
+	}
+	if fullRange {
+		filter += ":out_range=pc"
+	}
+	return filter
+}
+
+// fullRangeTonemap ports the forceFullRange argument of GetHwTonemapFilter:
+// an MJPEG encoder tone-maps to the pc range.
+func fullRangeTonemap(options HardwareOptions, mjpeg bool) HardwareOptions {
+	if mjpeg {
+		options.Tonemapping = options.tonemapping()
+		options.Tonemapping.Range = "pc"
+	}
+	return options
 }
 
 func swScaleFilter(job EncodingJob) string {

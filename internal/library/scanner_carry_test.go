@@ -34,6 +34,9 @@ func TestScannerRescanKeepsStoredProviderIDsAndImages(t *testing.T) {
 	}
 	assertScannerImagePaths(t, rescanned, map[string]bool{uploaded: true, remote: true, inLibrary: false})
 
+	// ReplaceAllImages replaces an image only with one that a provider
+	// supplies. No provider supplies one here, so both images stay
+	// (ItemImageProvider.RefreshImages).
 	_, err := fixture.harness.scanner.ScanWithOptions(t.Context(), library.RefreshOptions{
 		Metadata:         library.RefreshModeFullRefresh,
 		Image:            library.RefreshModeFullRefresh,
@@ -43,7 +46,21 @@ func TestScannerRescanKeepsStoredProviderIDsAndImages(t *testing.T) {
 		t.Fatalf("replace-all-images scan: %v", err)
 	}
 	replaced := scannerItemAtPath(t, fixture.harness.items, fixture.media)
-	assertScannerImagePaths(t, replaced, map[string]bool{uploaded: false, remote: false})
+	assertScannerImagePaths(t, replaced, map[string]bool{uploaded: true, remote: true})
+
+	// ReplaceAllMetadata with ReplaceAllImages removes the images in the
+	// internal metadata directory (ItemImageProvider.RemoveImages).
+	_, err = fixture.harness.scanner.ScanWithOptions(t.Context(), library.RefreshOptions{
+		Metadata:           library.RefreshModeFullRefresh,
+		Image:              library.RefreshModeFullRefresh,
+		ReplaceAllMetadata: true,
+		ReplaceAllImages:   true,
+	})
+	if err != nil {
+		t.Fatalf("replace-all scan: %v", err)
+	}
+	replaced = scannerItemAtPath(t, fixture.harness.items, fixture.media)
+	assertScannerImagePaths(t, replaced, map[string]bool{uploaded: false, remote: true})
 	if value, found := replaced.ProviderIDs.Get("Tmdb"); !found || value != "603" {
 		t.Fatalf("Tmdb provider ID after image replace = %q, %v; want 603", value, found)
 	}

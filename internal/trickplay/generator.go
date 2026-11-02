@@ -34,6 +34,7 @@ var (
 // closes it. Output is an existing, empty, caller-owned directory where the
 // extractor may publish JPEG frames.
 type FrameRequest struct {
+	ItemID               dto.UUID
 	Source               *os.File
 	Output               *rootfs.Dir
 	Width                int
@@ -461,7 +462,7 @@ func (generator *Generator) generate(ctx context.Context, request GenerateReques
 		return Metadata{}, fmt.Errorf("open frame staging directory: %w", err)
 	}
 	defer func() { returnErr = errors.Join(returnErr, frames.Close()) }()
-	extraction, err := generator.extractor.Extract(ctx, FrameRequest{Source: request.Source.File(), Output: frames, Width: preplan.Metadata.Width, RunTimeTicks: request.RunTimeTicks, IntervalMilliseconds: request.IntervalMilliseconds, ReferenceFrameRate: request.ReferenceFrameRate})
+	extraction, err := generator.extractor.Extract(ctx, FrameRequest{ItemID: request.ItemID, Source: request.Source.File(), Output: frames, Width: preplan.Metadata.Width, RunTimeTicks: request.RunTimeTicks, IntervalMilliseconds: request.IntervalMilliseconds, ReferenceFrameRate: request.ReferenceFrameRate})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return Metadata{}, ctxErr

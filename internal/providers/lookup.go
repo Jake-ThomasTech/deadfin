@@ -392,8 +392,8 @@ func FilterImagesByLanguage(images []RemoteImageInfo, preferredLanguage string, 
 	return result
 }
 
-// IsAllowedImageURL reports whether urlStr is an http(s) URL — the first step of
-// the provenance check (§4). Provider CDNs are https-only today.
+// IsAllowedImageURL reports whether urlStr is an http(s) URL, the scheme check
+// for a remote image download.
 func IsAllowedImageURL(urlStr string) bool {
 	parsed, err := url.Parse(urlStr)
 	if err != nil {

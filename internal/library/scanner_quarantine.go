@@ -47,6 +47,17 @@ func normalizePlanCredits(items []item.Item) {
 	}
 }
 
+// NormalizeItemLists collapses duplicate credits and values on one item,
+// as the scanner does before it stores a plan. The store keys credits on
+// (item, person, kind) and values on (item, value), so a provider result with
+// a repeated credit or value must pass through this before ItemStore.Upsert.
+func NormalizeItemLists(it *item.Item) {
+	plan := []item.Item{*it}
+	normalizePlanCredits(plan)
+	normalizePlanValues(plan)
+	*it = plan[0]
+}
+
 type personCreditKey struct {
 	id   dto.UUID
 	kind item.PersonKind

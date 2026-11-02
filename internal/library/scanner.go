@@ -332,6 +332,9 @@ type Scanner struct {
 	options   ScannerOptions
 	progress  *RefreshProgressBus
 	changes   *ChangeBus
+	// dotIgnore applies the .ignore files to directory listings. scanLocked
+	// resets its caches at the start of each scan.
+	dotIgnore *dotIgnoreRule
 
 	mu           sync.Mutex
 	closed       bool
@@ -435,6 +438,7 @@ func NewScanner(topology *Topology, items *store.ItemStore, chain *Chain, option
 		options:   options,
 		progress:  newRefreshProgressBus(options.Clock),
 		changes:   newChangeBus(options.Clock),
+		dotIgnore: newDotIgnoreRule(),
 		logger:    logger,
 		drained:   drained,
 	}, nil
@@ -1094,6 +1098,7 @@ func (s *Scanner) scanLocked(ctx context.Context, opts RefreshOptions) (result R
 		s.tracker = newProgressTracker(s.taskProgress)
 	}
 	s.counts = &refreshCounts{}
+	s.dotIgnore.reset()
 	result.RegenerateTrickplayItemIDs = mergeRegenerateTrickplayItemIDs(nil, opts.RegenerateTrickplayItemIDs)
 	defer func() {
 		cancel()
@@ -2287,7 +2292,7 @@ func (s *Scanner) resolveFolder(ctx context.Context, task scanTask) (folderResol
 	metadataCreated := snapshotDateCreated(desired)
 	// dynamicImages lists the candidates whose image refresh runs the
 	// dynamic image providers after media probing.
-	dynamicImages := make(map[int]RefreshOptions)
+	dynamicImages := make(map[int]dynamicImageTask)
 	if s.options.Refresher != nil {
 		// stamped lists the candidates whose providers all ran without a
 		// remote failure. They take one DateLastRefreshed sample after the
@@ -2300,6 +2305,9 @@ func (s *Scanner) resolveFolder(ctx context.Context, task scanTask) (folderResol
 			if previous, found := storedByPath[candidatePath]; found {
 				carryStoredProviderIDs(&desired[index], previous)
 				rehydrateRefreshLocks(&desired[index], previous)
+			}
+			if err := s.resolveBoxSetTmdbID(ctx, &desired[index]); err != nil {
+				return folderResolution{}, fmt.Errorf("refresh folder: %w", err)
 			}
 			directory, refreshEntries := task.entry, entries
 			if entry.IsDir {
@@ -2324,8 +2332,10 @@ func (s *Scanner) resolveFolder(ctx context.Context, task scanTask) (folderResol
 				return !ok || monitor.LocalMetadataChanged(refresh, *stored)
 			}, s.options.Now)
 			refresh.SkipRemoteMetadata = plan.skipRemote
-			if !s.remoteBackfill && runsDynamicImages(itemRefresh, stored) {
-				dynamicImages[index] = itemRefresh
+			runsDynamic, changedDynamic := false, false
+			if !s.remoteBackfill {
+				runsDynamic = runsDynamicImages(itemRefresh, stored)
+				changedDynamic = !runsDynamic && s.changedDynamicImages(itemRefresh, stored)
 			}
 			// Directory candidates receive their own listing as Entries. Their parent
 			// listing remains a frozen child fact so local providers can resolve parent
@@ -2343,6 +2353,9 @@ func (s *Scanner) resolveFolder(ctx context.Context, task scanTask) (folderResol
 			if err := before.validate(&desired[index]); err != nil {
 				before.restore(&desired[index])
 				return folderResolution{}, fmt.Errorf("refresh folder: %w", err)
+			}
+			if runsDynamic || changedDynamic {
+				dynamicImages[index] = dynamicImageTask{refresh: itemRefresh, supplied: suppliedImageTypes(desired[index].ImageInfos), changedOnly: changedDynamic}
 			}
 			if previous, found := storedByPath[candidatePath]; found {
 				carryStoredImages(&desired[index], previous, itemRefresh, task.libraryRoot)
@@ -2846,9 +2859,26 @@ func (r *RefreshResult) add(progress RefreshProgress) {
 		r.Inaccessible++
 	}
 	if progress.Error != nil {
-		r.Errors = append(r.Errors, progress.Error)
+		err := progress.Error
+		if progress.Status == "skipped" && !errors.Is(err, ErrItemSkipped) {
+			err = skippedItemError{err: err}
+		}
+		r.Errors = append(r.Errors, err)
 	}
 }
+
+// ErrItemSkipped matches, with errors.Is, a RefreshResult error that names
+// one item the scan skipped (a quarantined item or an item ID collision).
+// The scan stores the other items. Upstream logs such a per-item failure and
+// continues (LibraryManager.ResolveFileList), and the task completes, so a
+// task does not fail for these errors alone.
+var ErrItemSkipped = errors.New("library: item skipped")
+
+type skippedItemError struct{ err error }
+
+func (e skippedItemError) Error() string        { return e.err.Error() }
+func (e skippedItemError) Unwrap() error        { return e.err }
+func (e skippedItemError) Is(target error) bool { return target == ErrItemSkipped }
 
 // frozenEntriesByPath indexes one scanner-owned directory snapshot. Resolver
 // source paths must be facts from that snapshot, never filesystem guesses.

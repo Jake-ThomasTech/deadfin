@@ -40,7 +40,7 @@ func TestGeneratorRealFFmpegVipsSynthesizedColorSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTileComposer(): %v", err)
 	}
-	extractor, err := trickplay.NewFFmpegFrameExtractor(ffmpegPath)
+	extractor, err := trickplay.NewFFmpegFrameExtractor(ffmpegPath, nil)
 	if err != nil {
 		t.Fatalf("NewFFmpegFrameExtractor(%q): %v", ffmpegPath, err)
 	}

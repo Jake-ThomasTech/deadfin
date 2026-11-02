@@ -50,12 +50,13 @@ func (provider *LookupProvider) SearchSupports(kind item.Kind) bool {
 	return kind == item.KindMovie || kind == item.KindSeries
 }
 
-// ImageSupports reports the kinds TMDb can list images for (Movie, Series).
+// ImageSupports reports the kinds TMDb can list images for (Movie, Series,
+// BoxSet).
 func (provider *LookupProvider) ImageSupports(kind item.Kind) bool {
 	if provider.api == nil {
 		return false
 	}
-	return kind == item.KindMovie || kind == item.KindSeries
+	return kind == item.KindMovie || kind == item.KindSeries || kind == item.KindBoxSet
 }
 
 // ImageTypes returns the image types TMDb supplies for the kind, mirroring
@@ -63,6 +64,10 @@ func (provider *LookupProvider) ImageSupports(kind item.Kind) bool {
 func (provider *LookupProvider) ImageTypes(kind item.Kind) []item.ImageType {
 	if !provider.ImageSupports(kind) {
 		return nil
+	}
+	if kind == item.KindBoxSet {
+		// TmdbBoxSetImageProvider.GetSupportedImages.
+		return []item.ImageType{item.ImageTypePrimary, item.ImageTypeBackdrop, item.ImageTypeThumb}
 	}
 	return []item.ImageType{
 		item.ImageTypePrimary,
@@ -245,6 +250,18 @@ func (provider *LookupProvider) Images(ctx context.Context, lookup providers.Ima
 			return nil, err
 		}
 		return seriesImages(result, base, size), nil
+	case item.KindBoxSet:
+		// TmdbBoxSetImageProvider.GetImages: GetCollectionAsync(id, null,
+		// null, null) with images.
+		tmdbID := providerIDInt(lookup.ProviderIDs, "Tmdb")
+		if tmdbID <= 0 {
+			return nil, nil
+		}
+		result, err := provider.api.getCollection(ctx, tmdbID, "", "")
+		if err != nil || result == nil {
+			return nil, err
+		}
+		return collectionImages(result, base, size), nil
 	default:
 		return nil, nil
 	}

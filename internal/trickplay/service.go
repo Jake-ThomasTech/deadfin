@@ -41,14 +41,22 @@ type Access interface {
 	Visible(context.Context, dto.UUID, dto.UUID, bool) (bool, error)
 }
 
+// MediaPaths resolves the media file of an item.
+type MediaPaths interface {
+	MediaPath(context.Context, dto.UUID) (string, error)
+}
+
 // ReaderServiceConfig supplies the persisted-metadata source and the owned
 // trickplay artifact root. Root must be absolute so artifact lookup cannot be
-// affected by the process working directory.
+// affected by the process working directory. Media, when set, lets the reader
+// serve a rendition whose tiles are saved with the media (see MediaDirectory)
+// when the root has none.
 type ReaderServiceConfig struct {
 	Metadata    MetadataSource
 	Access      Access
 	Publication *PublicationCoordinator
 	Root        string
+	Media       MediaPaths
 }
 
 // ReadRequest is the transport-independent identity of a trickplay read.
@@ -78,6 +86,7 @@ type ReaderService struct {
 	metadata    MetadataSource
 	access      Access
 	publication *PublicationCoordinator
+	media       MediaPaths
 	root        string
 	rootMu      sync.RWMutex
 	rootFD      int
@@ -90,7 +99,7 @@ type ReaderService struct {
 // NewReaderService constructs a reader. Invalid configuration is retained and
 // reported by operations so construction remains usable by application wiring.
 func NewReaderService(config ReaderServiceConfig) *ReaderService {
-	service := &ReaderService{metadata: config.Metadata, access: config.Access, publication: config.Publication, root: config.Root, rootFD: -1}
+	service := &ReaderService{metadata: config.Metadata, access: config.Access, publication: config.Publication, media: config.Media, root: config.Root, rootFD: -1}
 	if readerNilMetadataSource(config.Metadata) {
 		service.configErr = fmt.Errorf("%w: metadata source is required", ErrInvalidRequest)
 	} else if readerNilAccess(config.Access) || config.Publication == nil {
@@ -228,6 +237,9 @@ func (service *ReaderService) Tile(ctx context.Context, request ReadRequest, ind
 		}
 
 		file, err := service.openTile(metadata, index)
+		if errors.Is(err, ErrNotFound) && service.media != nil {
+			file, err = service.openMediaTile(ctx, metadata, index)
+		}
 		if err == nil {
 			artifact, err := readerArtifact(file, metadata.GenerationToken)
 			if err == nil {
@@ -307,7 +319,10 @@ func (service *ReaderService) openTile(metadata Metadata, index int) (*os.File, 
 	}
 	defer func() { _ = unix.Close(directory) }()
 
-	name := strconv.Itoa(index) + ".jpg"
+	return readerOpenTileFile(directory, strconv.Itoa(index)+".jpg")
+}
+
+func readerOpenTileFile(directory int, name string) (*os.File, error) {
 	var targetInfo unix.Stat_t
 	if err := unix.Fstatat(directory, name, &targetInfo, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return nil, readerOpenError(err)
@@ -329,6 +344,34 @@ func (service *ReaderService) openTile(metadata Metadata, index int) (*os.File, 
 		return nil, fmt.Errorf("%w: tile is not a regular file", ErrUnsafeArtifact)
 	}
 	return os.NewFile(uintptr(fd), "trickplay tile"), nil
+}
+
+// openMediaTile opens a tile saved with the media
+// (TrickplayManager.GetTrickplayTilePathAsync with saveWithMedia). The media
+// tree may contain symbolic links up to the ".trickplay" directory; the
+// resolution directory and the tile must not be links.
+func (service *ReaderService) openMediaTile(ctx context.Context, metadata Metadata, index int) (*os.File, error) {
+	mediaPath, err := service.media.MediaPath(ctx, metadata.ItemID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) || store.IsNotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if mediaPath == "" || !filepath.IsAbs(mediaPath) {
+		return nil, ErrNotFound
+	}
+	root, err := unix.Open(MediaDirectory(mediaPath), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, readerOpenError(err)
+	}
+	defer func() { _ = unix.Close(root) }()
+	directory, err := readerOpenDirectory(root, trickplayResolutionName(metadata.Width, metadata.TileWidth, metadata.TileHeight))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = unix.Close(directory) }()
+	return readerOpenTileFile(directory, strconv.Itoa(index)+".jpg")
 }
 
 func readerArtifact(file *os.File, generationToken string) (Artifact, error) {

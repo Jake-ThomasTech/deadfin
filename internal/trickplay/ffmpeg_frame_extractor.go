@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/deadfin-org/deadfin/internal/clock"
+	"github.com/deadfin-org/deadfin/internal/dto"
+	"github.com/deadfin-org/deadfin/internal/encoding"
 	"github.com/deadfin-org/deadfin/internal/rootfs"
 	"golang.org/x/sys/unix"
 )
@@ -45,19 +47,39 @@ var (
 	ErrFrameExtractionFrameGeometryTooLarge = errors.New("trickplay: extracted frame geometry exceeds limit")
 )
 
+// Acceleration returns the hardware facts of one item's extraction:
+// TrickplayOptions.EnableHwAcceleration and EnableHwEncoding, the
+// encoding.xml selection, the probed capabilities, and the video stream.
+// A zero AllowHardwareAcceleration selects the software extraction.
+type Acceleration func(context.Context, dto.UUID) (encoding.TrickplayExtraction, encoding.Capabilities, error)
+
 // FFmpegFrameExtractor extracts one JPEG at each requested sampling interval
-// with ffmpeg's software decoder and MJPEG encoder.
+// with ffmpeg's MJPEG encoder. Acceleration, when set, selects hardware
+// decoding, filtering, and encoding for each item.
 type FFmpegFrameExtractor struct {
 	path         string
+	acceleration Acceleration
 	selfExecPath string
-	idleTimeout  time.Duration
+	// idleTimeout stops a run that writes no new frame for that long.
+	idleTimeout time.Duration
+	// totalTimeout, when positive, also bounds the whole run. Production
+	// extractors leave it zero: upstream ExtractVideoImagesOnIntervalInternal
+	// (MediaEncoder.cs) stops only an unresponsive process, so a long video
+	// gets as long as it needs while frames keep coming.
 	totalTimeout time.Duration
 }
 
 // NewFFmpegFrameExtractor validates the executable selection. The executable is
 // intentionally started only by Extract so caller cancellation owns the run.
-func NewFFmpegFrameExtractor(path string) (*FFmpegFrameExtractor, error) {
-	return newFFmpegFrameExtractor(path, defaultFrameExtractionTimeout)
+// A run stops when it writes no new frame for two minutes; it has no total
+// deadline. A nil acceleration always extracts in software.
+func NewFFmpegFrameExtractor(path string, acceleration Acceleration) (*FFmpegFrameExtractor, error) {
+	extractor, err := newFFmpegFrameExtractor(path, defaultFrameExtractionTimeout)
+	if err != nil {
+		return nil, err
+	}
+	extractor.acceleration = acceleration
+	return extractor, nil
 }
 
 func newFFmpegFrameExtractor(path string, idleTimeout time.Duration, totalTimeouts ...time.Duration) (*FFmpegFrameExtractor, error) {
@@ -71,12 +93,12 @@ func newFFmpegFrameExtractor(path string, idleTimeout time.Duration, totalTimeou
 	if len(totalTimeouts) > 1 {
 		return nil, errors.New("ffmpeg frame extractor accepts at most one total timeout")
 	}
-	totalTimeout := idleTimeout
+	var totalTimeout time.Duration
 	if len(totalTimeouts) == 1 {
 		totalTimeout = totalTimeouts[0]
-	}
-	if totalTimeout <= 0 {
-		return nil, errors.New("ffmpeg frame extraction total timeout must be positive")
+		if totalTimeout <= 0 {
+			return nil, errors.New("ffmpeg frame extraction total timeout must be positive")
+		}
 	}
 	selfExecPath, err := frameSinkSelfExecPath()
 	if err != nil {
@@ -127,20 +149,26 @@ func (extractor *FFmpegFrameExtractor) Extract(ctx context.Context, request Fram
 		}
 	}()
 
-	pattern := "%08d.jpg"
-	rate := normalizedReferenceFrameRate(request.ReferenceFrameRate)
-	fps := fmt.Sprintf("fps=1000/%d", request.IntervalMilliseconds)
-	if !hasExplicitReferenceFrameRate(request.ReferenceFrameRate) {
-		fps += ":round=up"
+	var job encoding.TrickplayExtraction
+	var caps encoding.Capabilities
+	if extractor.acceleration != nil {
+		job, caps, err = extractor.acceleration(ctx, request.ItemID)
+		if err != nil {
+			return FrameExtraction{}, fmt.Errorf("resolve trickplay hardware acceleration: %w", err)
+		}
 	}
-	filter := fmt.Sprintf("setpts=N/%.3f/TB,%s,scale=trunc(min(max(iw\\,ih*(a*sar))\\,%d)/2)*2:trunc(ow/(a*sar)/2)*2", rate, fps, request.Width)
-	args := []string{
-		"-hide_banner", "-loglevel", "error", "-nostdin",
-		"-hwaccel", "none", "-threads", "1",
-		"-i", fmt.Sprintf("/dev/fd/%d", sourceInputFD),
-		"-an", "-sn",
-		"-vf", filter,
-		"-threads", "1", "-strict", "unofficial", "-c:v", "mjpeg", "-q:v", "4", "-fps_mode", "passthrough", "-f", "image2", pattern,
+	job.InputPath = fmt.Sprintf("/dev/fd/%d", sourceInputFD)
+	job.OutputPattern = "%08d.jpg"
+	job.MaxWidth = request.Width
+	job.IntervalMilliseconds = request.IntervalMilliseconds
+	job.ReferenceFrameRate = 0
+	if hasExplicitReferenceFrameRate(request.ReferenceFrameRate) {
+		job.ReferenceFrameRate = float64(*request.ReferenceFrameRate)
+	}
+	job.Threads, job.QualityScale = 1, 4
+	args, err := encoding.BuildTrickplayArgs(job, caps)
+	if err != nil {
+		return FrameExtraction{}, err
 	}
 	var diagnostics boundedDiagnosticBuffer
 	diagnostics.limit = maxFrameExtractorDiagnostics
@@ -244,13 +272,6 @@ func (extractor *FFmpegFrameExtractor) Extract(ctx context.Context, request Fram
 	return FrameExtraction{Names: names, Height: height}, nil
 }
 
-func normalizedReferenceFrameRate(rate *float32) float32 {
-	if rate == nil || *rate <= 0 || *rate != *rate {
-		return 30
-	}
-	return *rate
-}
-
 func hasExplicitReferenceFrameRate(rate *float32) bool {
 	return rate != nil && *rate > 0 && *rate == *rate
 }
@@ -269,8 +290,12 @@ func watchFrameExtraction(ctx context.Context, cancel context.CancelFunc, output
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	totalDeadline := time.NewTimer(totalTimeout)
-	defer totalDeadline.Stop()
+	var totalDeadline <-chan time.Time
+	if totalTimeout > 0 {
+		timer := time.NewTimer(totalTimeout)
+		defer timer.Stop()
+		totalDeadline = timer.C
+	}
 	timeSource := clock.NewReal()
 	lastProgress := timeSource.Now()
 	lastCount := 0
@@ -288,7 +313,7 @@ func watchFrameExtraction(ctx context.Context, cancel context.CancelFunc, output
 			return
 		case <-ctx.Done():
 			return
-		case <-totalDeadline.C:
+		case <-totalDeadline:
 			close(totalTimedOut)
 			cancel()
 			return

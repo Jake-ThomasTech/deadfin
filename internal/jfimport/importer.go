@@ -50,6 +50,9 @@ type Options struct {
 	// Collections imports Jellyfin collections when set and the source reads
 	// them.
 	Collections CollectionImporter
+	// Trickplay imports Jellyfin TrickplayInfos when set and the source reads
+	// them.
+	Trickplay TrickplayImporter
 	// NewUserID mints the Deadfin id of each created user. Nil uses a random
 	// version-4 UUID.
 	NewUserID func() (dto.UUID, error)
@@ -70,6 +73,8 @@ type Report struct {
 	PlaylistEntriesMatched, PlaylistEntriesUnmatched       int
 	CollectionsImported                                    int
 	CollectionEntriesMatched, CollectionEntriesUnmatched   int
+	TrickplayImported, TrickplayExisting                   int
+	TrickplayNotWithMedia, TrickplayUnmatched              int
 	Warnings                                               []string
 }
 
@@ -111,6 +116,9 @@ func Run(ctx context.Context, src Source, identity Identity, items Items, option
 		return report, err
 	}
 	if err := importCollections(ctx, src, options.Collections, index, options, &report); err != nil {
+		return report, err
+	}
+	if err := importTrickplay(ctx, src, options.Trickplay, index, options, &report); err != nil {
 		return report, err
 	}
 	return report, nil

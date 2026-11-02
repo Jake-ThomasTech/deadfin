@@ -62,14 +62,16 @@ func (*Provider) Stage() providers.ProviderStage { return providers.ProviderStag
 func (provider *Provider) SupportsKind(kind item.Kind) bool { return provider.supports(kind) }
 
 // SupportedImages ports GetSupportedImages of TmdbMovieImageProvider,
-// TmdbSeriesImageProvider, TmdbSeasonImageProvider, and
-// TmdbEpisodeImageProvider.
+// TmdbSeriesImageProvider, TmdbSeasonImageProvider,
+// TmdbEpisodeImageProvider, and TmdbBoxSetImageProvider.
 func (*Provider) SupportedImages(kind item.Kind) []item.ImageType {
 	switch kind {
 	case item.KindMovie, item.KindSeries:
 		return []item.ImageType{item.ImageTypePrimary, item.ImageTypeBackdrop, item.ImageTypeLogo, item.ImageTypeThumb}
 	case item.KindSeason, item.KindEpisode:
 		return []item.ImageType{item.ImageTypePrimary}
+	case item.KindBoxSet:
+		return []item.ImageType{item.ImageTypePrimary, item.ImageTypeBackdrop, item.ImageTypeThumb}
 	default:
 		return nil
 	}
@@ -80,7 +82,7 @@ func (*Provider) SupportedImages(kind item.Kind) []item.ImageType {
 // ported.
 func (*Provider) supports(kind item.Kind) bool {
 	switch kind {
-	case item.KindMovie, item.KindSeries, item.KindSeason, item.KindEpisode:
+	case item.KindMovie, item.KindSeries, item.KindSeason, item.KindEpisode, item.KindBoxSet:
 		return true
 	default:
 		return false
@@ -124,6 +126,8 @@ func (provider *Provider) Refresh(ctx context.Context, refresh library.RefreshCo
 		return provider.refreshSeason(ctx, refresh, target, language, country, replaceImages)
 	case item.KindEpisode:
 		return provider.refreshEpisode(ctx, refresh, target, language, country, replaceImages)
+	case item.KindBoxSet:
+		return provider.refreshBoxSet(ctx, target, language, country, replaceImages)
 	default:
 		return false, nil
 	}
@@ -249,7 +253,7 @@ func (provider *Provider) applyMovie(ctx context.Context, target *item.Item, res
 		target.Extra.RemoteTrailers = trailers
 	}
 
-	provider.applyImages(ctx, target, result, replaceImages)
+	provider.applyImages(ctx, target, result.PosterPath, result.Images, replaceImages)
 }
 
 // moviePeople selects cast and wanted crew for a movie via the shared mapper.
@@ -263,7 +267,7 @@ func (provider *Provider) moviePeople(ctx context.Context, credits *credits) []i
 // applyImages adds remote image URLs for types local artwork did not supply.
 // Backdrops carrying a language (that is, containing text) become Thumb images,
 // matching ConvertToRemoteImageInfo.
-func (provider *Provider) applyImages(ctx context.Context, target *item.Item, result *movie, replace bool) {
+func (provider *Provider) applyImages(ctx context.Context, target *item.Item, posterPath string, artwork *images, replace bool) {
 	base := provider.api.imageBaseURL(ctx)
 	size := provider.config.imageSizeOrOriginal()
 
@@ -275,17 +279,17 @@ func (provider *Provider) applyImages(ctx context.Context, target *item.Item, re
 	}
 
 	// poster_path carries no dimensions; the image collection does.
-	primary := imageData{FilePath: result.PosterPath}
-	if result.Images != nil && len(result.Images.Posters) > 0 {
-		primary = result.Images.Posters[0]
+	primary := imageData{FilePath: posterPath}
+	if artwork != nil && len(artwork.Posters) > 0 {
+		primary = artwork.Posters[0]
 	}
 	add(item.ImageTypePrimary, primary)
 
-	if result.Images != nil {
+	if artwork != nil {
 		// Only the first backdrop of each type attaches, so a replacing
 		// refresh keeps TMDb's top-ranked one instead of the last.
 		added := map[item.ImageType]bool{}
-		for _, backdrop := range result.Images.Backdrops {
+		for _, backdrop := range artwork.Backdrops {
 			kind := item.ImageTypeBackdrop
 			if adjustImageLanguage(backdrop.Iso6391, "") != "" {
 				kind = item.ImageTypeThumb
@@ -296,8 +300,8 @@ func (provider *Provider) applyImages(ctx context.Context, target *item.Item, re
 			added[kind] = true
 			add(kind, backdrop)
 		}
-		if len(result.Images.Logos) > 0 {
-			add(item.ImageTypeLogo, result.Images.Logos[0])
+		if len(artwork.Logos) > 0 {
+			add(item.ImageTypeLogo, artwork.Logos[0])
 		}
 	}
 }

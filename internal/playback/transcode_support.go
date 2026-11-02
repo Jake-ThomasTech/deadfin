@@ -55,6 +55,12 @@ func (support TranscodeEncoding) CanExtractSubtitles(string) bool {
 	return support.SubtitleExtraction()
 }
 
+// EncodingVideoStream projects the probed stream facts that the pure
+// encoding builders use, for callers outside playback (trickplay).
+func EncodingVideoStream(video MediaStream) encoding.VideoStream {
+	return encodingVideoStream(&video)
+}
+
 // encodingVideoStream projects the probed stream facts that the pure
 // encoding builders use.
 func encodingVideoStream(video *MediaStream) encoding.VideoStream {

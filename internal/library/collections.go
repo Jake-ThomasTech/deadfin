@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/deadfin-org/deadfin/internal/dto"
 	"github.com/deadfin-org/deadfin/internal/item"
@@ -39,7 +41,10 @@ func (s *Scanner) CreateCollection(ctx context.Context, name string, locked bool
 	if err != nil {
 		return item.Item{}, err
 	}
-	directory := filepath.Join(*root.Path, dfpath.ValidFilename(name)+" [boxset]")
+	directory, err := collectionDirectory(*root.Path, dfpath.ValidFilename(name)+" [boxset]")
+	if err != nil {
+		return item.Item{}, err
+	}
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return item.Item{}, fmt.Errorf("create collection directory: %w", err)
 	}
@@ -78,6 +83,29 @@ func (s *Scanner) CreateCollection(ctx context.Context, name string, locked bool
 		return item.Item{}, fmt.Errorf("store collection: %w", err)
 	}
 	return values[0], nil
+}
+
+// collectionDirectory returns the path of the collection directory base in
+// root. Item IDs hash the lowercased path, so a directory whose name differs
+// from base only in case has the same item ID. When root has such a
+// directory, collectionDirectory returns it instead of a new path, so the
+// two directories never collide in a scan (divergence D-115).
+func collectionDirectory(root, base string) (string, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", fmt.Errorf("read collections directory: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == base {
+			return filepath.Join(root, base), nil
+		}
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.EqualFold(entry.Name(), base) {
+			return filepath.Join(root, entry.Name()), nil
+		}
+	}
+	return filepath.Join(root, base), nil
 }
 
 // collectionsFolder ports EnsureLibraryFolder: it finds the library whose
@@ -195,6 +223,12 @@ const autoCollectionPageSize = 1000
 // versions by their TMDb collection name. A group joins the BoxSet with that
 // name; when no such BoxSet exists, a group of two or more movies creates
 // one. A failure on one collection is logged and the task continues.
+//
+// Upstream matches the name exactly. Deadfin then also matches a BoxSet
+// whose Tmdb provider ID is the TMDb collection ID of a movie in the group,
+// and last a BoxSet whose name differs only in case (divergence D-115). An
+// imported collection that TMDb now spells or names differently thus gets
+// the movies, and no duplicate collection is created beside it.
 func (s *Scanner) AddMoviesToCollections(ctx context.Context, progress func(float64)) error {
 	report := func(value float64) {
 		if progress != nil {
@@ -206,6 +240,7 @@ func (s *Scanner) AddMoviesToCollections(ctx context.Context, progress func(floa
 		return err
 	}
 	groups := map[string]map[dto.UUID]struct{}{}
+	tmdbIDs := map[string]map[string]struct{}{}
 	for _, folder := range folders {
 		if !folder.Options.AutomaticallyAddToCollection {
 			continue
@@ -236,6 +271,12 @@ func (s *Scanner) AddMoviesToCollections(ctx context.Context, progress func(floa
 					groups[name] = map[dto.UUID]struct{}{}
 				}
 				groups[name][movie.ID] = struct{}{}
+				if id, ok := movie.ProviderIDs.Get("TmdbCollection"); ok && id != "" {
+					if tmdbIDs[name] == nil {
+						tmdbIDs[name] = map[string]struct{}{}
+					}
+					tmdbIDs[name][id] = struct{}{}
+				}
 			}
 			if len(page.Items) < autoCollectionPageSize {
 				break
@@ -251,12 +292,39 @@ func (s *Scanner) AddMoviesToCollections(ctx context.Context, progress func(floa
 		return fmt.Errorf("auto collections: list collections: %w", err)
 	}
 	byName := map[string]dto.UUID{}
+	byFoldedName := map[string]dto.UUID{}
+	byTmdbID := map[string]dto.UUID{}
 	for _, boxSet := range boxSets.Items {
 		if boxSet.Name != nil {
 			if _, seen := byName[*boxSet.Name]; !seen {
 				byName[*boxSet.Name] = boxSet.ID
 			}
+			if _, seen := byFoldedName[strings.ToLower(*boxSet.Name)]; !seen {
+				byFoldedName[strings.ToLower(*boxSet.Name)] = boxSet.ID
+			}
 		}
+		if id, ok := boxSet.ProviderIDs.Get("Tmdb"); ok && id != "" {
+			if _, seen := byTmdbID[id]; !seen {
+				byTmdbID[id] = boxSet.ID
+			}
+		}
+	}
+	find := func(name string) (dto.UUID, bool) {
+		if id, found := byName[name]; found {
+			return id, true
+		}
+		ids := make([]string, 0, len(tmdbIDs[name]))
+		for id := range tmdbIDs[name] {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, tmdbID := range ids {
+			if id, found := byTmdbID[tmdbID]; found {
+				return id, true
+			}
+		}
+		id, found := byFoldedName[strings.ToLower(name)]
+		return id, found
 	}
 	names := make([]string, 0, len(groups))
 	for name := range groups {
@@ -272,7 +340,7 @@ func (s *Scanner) AddMoviesToCollections(ctx context.Context, progress func(floa
 			movies = append(movies, id)
 		}
 		sort.Slice(movies, func(i, j int) bool { return movies[i].String() < movies[j].String() })
-		boxSetID, found := byName[name]
+		boxSetID, found := find(name)
 		if !found && len(movies) >= 2 {
 			created, err := s.CreateCollection(ctx, name, false)
 			if err != nil {
@@ -281,6 +349,7 @@ func (s *Scanner) AddMoviesToCollections(ctx context.Context, progress func(floa
 			}
 			boxSetID, found = created.ID, true
 			byName[name] = boxSetID
+			byFoldedName[strings.ToLower(name)] = boxSetID
 		}
 		if found {
 			if err := s.storeWrite(ctx, func() error { return s.items.AddToCollection(ctx, boxSetID, movies) }); err != nil {
@@ -290,5 +359,46 @@ func (s *Scanner) AddMoviesToCollections(ctx context.Context, progress func(floa
 		report(100 * float64(index+1) / float64(len(names)))
 	}
 	report(100)
+	return nil
+}
+
+// resolveBoxSetTmdbID gives a BoxSet without a Tmdb provider ID the TMDb
+// collection ID that most of its movies carry as TmdbCollection; a tie takes
+// the lowest ID. Upstream TmdbBoxSetProvider only searches TMDb by the
+// collection name. The members' ID also finds a collection whose name
+// differs from TMDb's (divergence D-116).
+func (s *Scanner) resolveBoxSetTmdbID(ctx context.Context, candidate *item.Item) error {
+	if candidate.Kind != item.KindBoxSet || candidate.ID.IsNil() {
+		return nil
+	}
+	if id, ok := candidate.ProviderIDs.Get("Tmdb"); ok && strings.TrimSpace(id) != "" {
+		return nil
+	}
+	parentID := candidate.ID
+	members, err := s.items.Query(ctx, store.ItemQuery{ParentID: &parentID, IncludeItemTypes: []item.Kind{item.KindMovie}})
+	if err != nil {
+		return fmt.Errorf("list collection members of %s: %w", candidate.ID, err)
+	}
+	counts := map[string]int{}
+	for _, member := range members.Items {
+		if id, ok := member.ProviderIDs.Get("TmdbCollection"); ok {
+			if id = strings.TrimSpace(id); id != "" {
+				counts[id]++
+			}
+		}
+	}
+	best, bestCount, bestNumber := "", 0, 0
+	for id, count := range counts {
+		number, err := strconv.Atoi(id)
+		if err != nil || number <= 0 {
+			continue
+		}
+		if count > bestCount || (count == bestCount && number < bestNumber) {
+			best, bestCount, bestNumber = id, count, number
+		}
+	}
+	if best != "" {
+		candidate.ProviderIDs.Set("Tmdb", best)
+	}
 	return nil
 }

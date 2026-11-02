@@ -4,6 +4,7 @@ package jellyfinsource_test
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -100,5 +101,59 @@ func TestSourceReadsPlaylists(t *testing.T) {
 				t.Fatalf("children = %v (unresolved %d), want %v (unresolved %d)", got.ChildPaths, got.UnresolvedChildren, test.children, test.unresolved)
 			}
 		})
+	}
+}
+
+// TestSourceReadsCollectionProvidersAndImages proves that a collection
+// carries its BaseItemProviders rows and its BaseItemImageInfos rows, with
+// %AppDataPath% and %MetadataPath% expanded beside the database
+// (deadfin#808).
+func TestSourceReadsCollectionProvidersAndImages(t *testing.T) {
+	const boxSet = "DDDDDDDD-0000-0000-0000-000000000001"
+	root := t.TempDir()
+	path := filepath.Join(root, "data", "jellyfin.db")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE BaseItems (Id TEXT PRIMARY KEY, Type TEXT, Name TEXT, Path TEXT, Data TEXT, DateCreated TEXT)`,
+		`INSERT INTO BaseItems VALUES ('` + boxSet + `','MediaBrowser.Controller.Entities.Movies.BoxSet','Cars Collection','%AppDataPath%/collections/Cars Collection [boxset]',NULL,NULL)`,
+		`CREATE TABLE BaseItemProviders (ItemId TEXT, ProviderId TEXT, ProviderValue TEXT)`,
+		`INSERT INTO BaseItemProviders VALUES ('` + boxSet + `','Tmdb','87118'), ('` + boxSet + `','Imdb','')`,
+		`CREATE TABLE BaseItemImageInfos (Id TEXT, Path TEXT, DateModified TEXT, ImageType INTEGER, Width INTEGER, Height INTEGER, Blurhash BLOB, ItemId TEXT)`,
+		`INSERT INTO BaseItemImageInfos VALUES ('E2','%MetadataPath%/library/dd/dddd/backdrop.jpg',NULL,2,0,0,NULL,'` + boxSet + `'),
+			('E1','%AppDataPath%/collections/Cars Collection [boxset]/poster.jpg',NULL,0,0,0,NULL,'` + boxSet + `'),
+			('E3','https://image.tmdb.org/t/p/original/cars.jpg',NULL,5,0,0,NULL,'` + boxSet + `')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("fixture: %v\n%s", err, statement)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	src, err := jellyfinsource.Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	values, err := src.Containers(t.Context(), jellyfinsource.BoxSetType)
+	if err != nil || len(values) != 1 {
+		t.Fatalf("containers = %+v, %v", values, err)
+	}
+	if want := map[string]string{"Tmdb": "87118"}; !reflect.DeepEqual(values[0].ProviderIDs, want) {
+		t.Errorf("provider ids = %v, want %v", values[0].ProviderIDs, want)
+	}
+	want := []jellyfinsource.Image{
+		{Type: 0, Path: filepath.Join(root, "data", "collections", "Cars Collection [boxset]", "poster.jpg")},
+		{Type: 2, Path: filepath.Join(root, "metadata", "library", "dd", "dddd", "backdrop.jpg")},
+		{Type: 5, Path: "https://image.tmdb.org/t/p/original/cars.jpg"},
+	}
+	if !reflect.DeepEqual(values[0].Images, want) {
+		t.Errorf("images = %#v, want %#v", values[0].Images, want)
 	}
 }

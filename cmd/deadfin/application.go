@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -323,6 +324,7 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 	audioDbRemote := audioDbRemoteConfig(realClock)
 	audioDbRemote.Doer = appConfig.providerRemoteDoer
 	audioDbHTTP := remote.NewClient(audioDbRemote)
+	audioDbProvider := audiodb.NewProvider(audiodb.Options{HTTP: audioDbHTTP, Config: audioDbConfig})
 	refresher := providers.NewRegistry(
 		providers.NewLocalImageProvider(),
 		providers.NewNFOProvider(providers.NFOProviderOptions{
@@ -334,7 +336,7 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 			},
 		}),
 		musicbrainz.NewProvider(musicbrainz.Options{HTTP: musicBrainzHTTP, Config: musicBrainzConfig}),
-		audiodb.NewProvider(audiodb.Options{HTTP: audioDbHTTP, Config: audioDbConfig}),
+		audioDbProvider,
 		tmdbProvider,
 		// AniList acts only in libraries that list it among the series
 		// metadata fetchers; order it after TheMovieDb so its titles win.
@@ -357,7 +359,7 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 	musicbrainzLookup := musicbrainz.NewLookupProvider(musicbrainz.Options{HTTP: musicBrainzHTTP, Config: musicBrainzConfig})
 	lookupRegistry := providers.NewLookupRegistry(
 		[]providers.Searcher{tmdbLookup, musicbrainzLookup},
-		[]providers.ImageLister{tmdbLookup},
+		[]providers.ImageLister{tmdbLookup, audioDbProvider},
 	)
 	virtualPaths := path.NewVirtualPathExpander(paths.Data, paths.Metadata)
 	items := store.NewItemStore(stores)
@@ -567,9 +569,10 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		},
 		Publication: trickplayPublication,
 		Root:        paths.Trickplay,
+		Media:       trickplayMediaPaths{items: items},
 	})
 	if appConfig.tileComposer != nil {
-		frameExtractor, extractErr := trickplay.NewFFmpegFrameExtractor("ffmpeg")
+		frameExtractor, extractErr := trickplay.NewFFmpegFrameExtractor("ffmpeg", trickplayAcceleration(manager, hardware.Current, items))
 		if extractErr != nil {
 			return nil, fmt.Errorf("open trickplay frame extractor: %w", extractErr)
 		}
@@ -588,7 +591,7 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		frozenOptions.Widths = append([]int(nil), options.Widths...)
 		task := tasks.NewTrickplayTask(
 			trickplayTaskSource{items: items, topology: topology, options: frozenOptions},
-			trickplayTaskGenerator{generator: generator},
+			trickplayTaskGenerator{generator: generator, discovery: items, interval: options.IntervalMilliseconds},
 			trickplayTaskReporter{},
 			options,
 		)
@@ -673,7 +676,7 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 	// Image serving needs the process-owned libvips runtime, which is opened
 	// once in runServer and injected; construction tests omit it and the image
 	// routes answer 503. Remote provider artwork is downloaded on demand into
-	// the image cache. The hardened image downloader enforces HTTPS-only,
+	// the image cache. The hardened image downloader enforces http(s) only,
 	// dial-time rejection of non-global-unicast addresses, and image content
 	// validation (ring security/remote-image-download@v1) for both the serving
 	// path and the identify Download endpoint.
@@ -1324,6 +1327,9 @@ func (source trickplayTaskSource) candidate(ctx context.Context, value item.Item
 		return tasks.Candidate{}, err
 	}
 	candidate := tasks.Candidate{ID: value.ID, SourceRevision: snapshot.SourceRevision}
+	if value.Name != nil {
+		candidate.Name = *value.Name
+	}
 	if snapshot.Path != nil {
 		candidate.SourcePath = *snapshot.Path
 	}
@@ -1355,11 +1361,19 @@ func (source trickplayTaskSource) candidate(ctx context.Context, value item.Item
 		referenceFrameRate := *snapshot.ReferenceFrameRate
 		candidate.ReferenceFrameRate = &referenceFrameRate
 	}
-	if snapshot.FileInode == nil || snapshot.FileChangedAt == nil || value.TopParentID == nil || !libraries[*value.TopParentID].EnableTrickplayImageExtraction || candidate.SourcePath == "" {
+	if snapshot.FileInode == nil || snapshot.FileChangedAt == nil || value.TopParentID == nil || candidate.SourcePath == "" {
 		return candidate, nil
 	}
-	candidate.ExtractDuringScan = libraries[*value.TopParentID].ExtractTrickplayImagesDuringLibraryScan
-	if !(trickplay.Manager{}).CanGenerate(candidate.RunTimeTicks, source.options.IntervalMilliseconds) {
+	libraryOptions := libraries[*value.TopParentID]
+	canGenerate := (trickplay.Manager{}).CanGenerate(candidate.RunTimeTicks, source.options.IntervalMilliseconds)
+	// RefreshTrickplayDataAsync discovers existing trickplay before it
+	// checks EnableTrickplayImageExtraction.
+	candidate.Discover = canGenerate && libraryOptions.SaveTrickplayWithMedia
+	if !libraryOptions.EnableTrickplayImageExtraction {
+		return candidate, nil
+	}
+	candidate.ExtractDuringScan = libraryOptions.ExtractTrickplayImagesDuringLibraryScan
+	if !canGenerate {
 		return candidate, nil
 	}
 	persisted, err := source.items.Trickplays(ctx, value.ID)
@@ -1417,7 +1431,122 @@ type trickplayGenerationExecutor interface {
 	Generate(context.Context, trickplay.GenerateRequest) (trickplay.Metadata, error)
 }
 
-type trickplayTaskGenerator struct{ generator trickplayGenerationExecutor }
+// trickplayDiscoveryStore persists discovered media-side trickplay.
+type trickplayDiscoveryStore interface {
+	Trickplays(context.Context, dto.UUID) ([]store.TrickplayInfo, error)
+	ReplaceTrickplay(context.Context, store.TrickplayInfo) error
+}
+
+type trickplayTaskGenerator struct {
+	generator trickplayGenerationExecutor
+	// discovery, when set, catalogues trickplay saved with the media;
+	// interval is the configured TrickplayOptions.Interval.
+	discovery trickplayDiscoveryStore
+	interval  int64
+}
+
+// Discover ports TrickplayManager.DiscoverExistingTrickplayAsync for a
+// library that saves trickplay with the media: each media-side resolution
+// whose width has no row is persisted, so the task does not generate it
+// again and the reader serves its tiles in place.
+func (adapter trickplayTaskGenerator) Discover(ctx context.Context, candidate tasks.Candidate) ([]int, error) {
+	if adapter.discovery == nil {
+		return nil, nil
+	}
+	persisted, err := adapter.discovery.Trickplays(ctx, candidate.ID)
+	if err != nil {
+		return nil, fmt.Errorf("read trickplay metadata: %w", err)
+	}
+	existing := make([]int, len(persisted))
+	for index, value := range persisted {
+		existing[index] = value.Width
+	}
+	discovered, err := trickplay.DiscoverMedia(ctx, trickplay.DiscoverRequest{
+		ItemID: candidate.ID, MediaPath: candidate.SourcePath, RunTimeTicks: candidate.RunTimeTicks,
+		IntervalMilliseconds: adapter.interval, ExistingWidths: existing,
+	})
+	if err != nil {
+		return nil, err
+	}
+	widths := make([]int, 0, len(discovered))
+	for _, value := range discovered {
+		token, err := discoveredTrickplayToken()
+		if err != nil {
+			return widths, err
+		}
+		if err := adapter.discovery.ReplaceTrickplay(ctx, store.TrickplayInfo{
+			ItemID: value.ItemID, SourceRevision: candidate.SourceRevision, Width: value.Width, Height: value.Height,
+			TileWidth: value.TileWidth, TileHeight: value.TileHeight, ThumbnailCount: value.ThumbnailCount,
+			IntervalMS: value.Interval, Bandwidth: value.Bandwidth, GenerationToken: token,
+		}); err != nil {
+			return widths, fmt.Errorf("persist discovered trickplay width %d: %w", value.Width, err)
+		}
+		slog.Info("discovered existing trickplay",
+			slog.String("item_id", candidate.ID.Dashed()), slog.String("path", candidate.SourcePath),
+			slog.Int("width", value.Width), slog.Int("tile_width", value.TileWidth), slog.Int("tile_height", value.TileHeight),
+			slog.Int("thumbnails", value.ThumbnailCount), slog.Int64("interval_ms", value.Interval))
+		widths = append(widths, value.Width)
+	}
+	return widths, nil
+}
+
+// discoveredTrickplayToken names a discovered rendition. The tiles are not
+// Deadfin's publication, so the token only has to change when the row does.
+func discoveredTrickplayToken() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("create trickplay generation token: %w", err)
+	}
+	return hex.EncodeToString(value[:]), nil
+}
+
+// trickplayAcceleration honours TrickplayOptions.EnableHwAcceleration and
+// EnableHwEncoding through the encoding.xml hardware selection, as
+// MediaEncoder.ExtractVideoImagesOnIntervalAccelerated does. The options and
+// capabilities are read for each extraction, so a dashboard save applies to
+// the next item.
+func trickplayAcceleration(manager *config.Manager, capabilities func() encoding.Capabilities, items *store.ItemStore) trickplay.Acceleration {
+	return func(ctx context.Context, itemID dto.UUID) (encoding.TrickplayExtraction, encoding.Capabilities, error) {
+		options := manager.System().TrickplayOptions
+		if !options.EnableHwAcceleration {
+			return encoding.TrickplayExtraction{}, encoding.Capabilities{}, nil
+		}
+		streams, err := items.Streams(ctx, itemID)
+		if err != nil {
+			return encoding.TrickplayExtraction{}, encoding.Capabilities{}, fmt.Errorf("read media streams: %w", err)
+		}
+		job := encoding.TrickplayExtraction{
+			AllowHardwareAcceleration: true,
+			EnableHardwareEncoding:    options.EnableHwEncoding,
+			Hardware:                  hardwareOptions(manager.Encoding(), renderNodeExists),
+		}
+		for _, stream := range streams {
+			if stream.Type != playback.StreamTypeVideo {
+				continue
+			}
+			job.VideoStream = playback.EncodingVideoStream(stream)
+			if stream.AspectRatio != nil {
+				job.AspectRatio = *stream.AspectRatio
+			}
+			break
+		}
+		return job, capabilities(), nil
+	}
+}
+
+// trickplayMediaPaths resolves an item's media file for the trickplay reader.
+type trickplayMediaPaths struct{ items *store.ItemStore }
+
+func (paths trickplayMediaPaths) MediaPath(ctx context.Context, itemID dto.UUID) (string, error) {
+	snapshot, err := paths.items.DerivedSourceSnapshot(ctx, itemID)
+	if err != nil {
+		return "", err
+	}
+	if snapshot.Path == nil {
+		return "", nil
+	}
+	return *snapshot.Path, nil
+}
 
 func (adapter trickplayTaskGenerator) Generate(ctx context.Context, generation tasks.Generation) (err error) {
 	if generation.Candidate.SourceInode == nil || generation.Candidate.SourceChangedAt == nil {
@@ -1462,7 +1591,9 @@ func (trickplayTaskReporter) Progress(progress float64) {
 }
 
 func (trickplayTaskReporter) ItemError(candidate tasks.Candidate, err error) {
-	log.Printf("trickplay refresh for %s (%s): %v", candidate.Name, candidate.ID.Dashed(), err)
+	slog.Warn("trickplay refresh failed for an item; continuing with the next item",
+		slog.String("item_id", candidate.ID.Dashed()), slog.String("name", candidate.Name),
+		slog.String("path", candidate.SourcePath), slog.String("error", err.Error()))
 }
 
 // libraryScanAdapter adapts the scanner's synchronous Scan method to the
@@ -1477,6 +1608,11 @@ func (a libraryScanAdapter) Scan(ctx context.Context, progress func(float64)) (a
 		return nil, nil
 	}
 	result, err := a.scanner.ScanWithProgress(ctx, library.DefaultRefreshOptions(), progress)
+	for _, folderErr := range result.Errors {
+		if errors.Is(folderErr, library.ErrItemSkipped) {
+			log.Printf("library scan: %v", folderErr)
+		}
+	}
 	return result, foldRefreshErrors(err, result.Errors)
 }
 
@@ -1498,7 +1634,11 @@ func (a metadataRefreshAdapter) RefreshMetadata(ctx context.Context, progress fu
 	log.Printf("refresh metadata: provider invocations=%d persisted_provider_ids=%d persisted_images=%d updated=%d skipped=%d",
 		result.ProviderInvocations, result.PersistedProviderIDs, result.PersistedImages, result.BackfillUpdated, result.BackfillSkipped)
 	for _, folderErr := range result.Errors {
-		log.Printf("refresh metadata: failed path: %v", folderErr)
+		if errors.Is(folderErr, library.ErrItemSkipped) {
+			log.Printf("refresh metadata: %v", folderErr)
+		} else {
+			log.Printf("refresh metadata: failed path: %v", folderErr)
+		}
 	}
 	return foldRefreshErrors(err, result.Errors)
 }
@@ -1506,16 +1646,22 @@ func (a metadataRefreshAdapter) RefreshMetadata(ctx context.Context, progress fu
 // foldRefreshErrors joins the top-level scan error with every per-folder error.
 // A nil error with no folder errors stays nil, so a clean scan records
 // Completed. A folder failure alone produces a non-nil error, so the
-// scheduler records Failed with the folder path and cause.
+// scheduler records Failed with the folder path and cause. A skipped item
+// (library.ErrItemSkipped) is logged by the caller and does not fail the
+// task, as upstream logs a per-item failure and completes.
 func foldRefreshErrors(err error, folderErrors []error) error {
-	if err == nil && len(folderErrors) == 0 {
-		return nil
-	}
 	errs := make([]error, 0, 1+len(folderErrors))
 	if err != nil {
 		errs = append(errs, err)
 	}
-	errs = append(errs, folderErrors...)
+	for _, folderErr := range folderErrors {
+		if !errors.Is(folderErr, library.ErrItemSkipped) {
+			errs = append(errs, folderErr)
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
 	return errors.Join(errs...)
 }
 

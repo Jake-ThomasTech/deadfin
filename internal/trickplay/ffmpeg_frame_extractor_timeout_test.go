@@ -181,6 +181,54 @@ func waitForHungFrameExtractorExit(t *testing.T, pid int, timeout time.Duration)
 // TestFFmpegFrameExtractorBoundHelper continuously publishes valid numbered
 // JPEGs after announcing a leader and descendant. It models an ffmpeg that is
 // making observable frame progress but does not terminate on its own.
+// A run that keeps writing frames has no total deadline (#806): upstream
+// ExtractVideoImagesOnIntervalInternal stops only an unresponsive process.
+func TestFFmpegFrameExtractorHasNoTotalDeadlineWhileFramesProgress(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process groups are unavailable on Windows")
+	}
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+	production, err := NewFFmpegFrameExtractor("ffmpeg", nil)
+	if err != nil {
+		t.Fatalf("NewFFmpegFrameExtractor(): %v", err)
+	}
+	if production.totalTimeout != 0 {
+		t.Fatalf("production total timeout = %s, want none", production.totalTimeout)
+	}
+
+	fixture := newFrameExtractorBoundFixture(t, "steady")
+	// The helper writes for about five seconds; the idle timeout is shorter
+	// but covers helper startup, so a total deadline equal to it would stop
+	// the run.
+	extractor, err := newFFmpegFrameExtractor(fixture.path, 3*time.Second)
+	if err != nil {
+		t.Fatalf("newFFmpegFrameExtractor(): %v", err)
+	}
+	runtimeTicks := int64(50 * 10_000_000)
+	source := openTrickplayTestSource(t).File()
+	result := make(chan error, 1)
+	go func() {
+		extraction, err := extractor.Extract(t.Context(), FrameRequest{
+			Source: source, Output: fixture.output, Width: 320,
+			IntervalMilliseconds: 1_000, RunTimeTicks: &runtimeTicks,
+		})
+		if err == nil && len(extraction.Names) != 50 {
+			err = fmt.Errorf("extracted %d frames, want 50", len(extraction.Names))
+		}
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("Extract(steady ffmpeg) = %v, want success", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Extract(steady ffmpeg) did not return")
+	}
+	fixture.waitForExit(t)
+}
+
 func TestFFmpegFrameExtractorBoundHelper(t *testing.T) {
 	if os.Getenv("GO_WANT_FRAME_EXTRACTOR_BOUND_HELPER") != "1" {
 		return
@@ -227,6 +275,24 @@ func TestFFmpegFrameExtractorBoundHelper(t *testing.T) {
 		if err := os.WriteFile(os.Getenv("FRAME_EXTRACTOR_BOUND_READY"), []byte("published pathological geometry"), 0o600); err != nil {
 			_, _ = os.Stderr.WriteString(err.Error())
 			os.Exit(125)
+		}
+		return
+	}
+	if mode == "steady" {
+		// Write frames for longer than the idle timeout, each well inside
+		// one, then finish like a long video that keeps making progress.
+		for index := 1; index <= 50; index++ {
+			if err := writeFrame(index); err != nil {
+				_, _ = os.Stderr.WriteString(err.Error())
+				os.Exit(125)
+			}
+			if index == 1 {
+				if err := os.WriteFile(os.Getenv("FRAME_EXTRACTOR_BOUND_READY"), []byte("progressing"), 0o600); err != nil {
+					_, _ = os.Stderr.WriteString(err.Error())
+					os.Exit(125)
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
 		return
 	}

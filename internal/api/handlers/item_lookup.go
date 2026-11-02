@@ -5,6 +5,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -110,6 +111,8 @@ func (h itemLookupHandler) apply(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.reader.Query(r.Context(), store.ItemQuery{ItemIDs: []dto.UUID{id}, Recursive: true})
 	if err != nil {
+		slog.Default().LogAttrs(r.Context(), slog.LevelError, "apply remote search result: load item failed",
+			slog.String("item", id.String()), slog.String("error", err.Error()))
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -130,6 +133,8 @@ func (h itemLookupHandler) apply(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, identify.ErrItemNotFound):
 			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		default:
+			slog.Default().LogAttrs(r.Context(), slog.LevelError, "apply remote search result failed",
+				slog.String("item", id.String()), slog.String("error", err.Error()))
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 		return

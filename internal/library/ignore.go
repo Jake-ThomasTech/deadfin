@@ -65,9 +65,23 @@ func isPathSeparator(r rune) bool {
 // withoutIgnoredEntries returns entries without the ones that ignoredPath
 // matches. It does not modify entries, which an injected ReadDir may share.
 func withoutIgnoredEntries(entries []Entry) []Entry {
+	kept, _ := filterEntries(entries, func(entry Entry) (bool, error) {
+		return ignoredPath(entry.Path), nil
+	})
+	return kept
+}
+
+// filterEntries returns entries without the ones that drop reports. It
+// returns entries itself when drop reports none, and it does not modify
+// entries.
+func filterEntries(entries []Entry, drop func(Entry) (bool, error)) ([]Entry, error) {
 	var kept []Entry
 	for index, entry := range entries {
-		if !ignoredPath(entry.Path) {
+		dropped, err := drop(entry)
+		if err != nil {
+			return nil, err
+		}
+		if !dropped {
 			if kept != nil {
 				kept = append(kept, entry)
 			}
@@ -79,17 +93,18 @@ func withoutIgnoredEntries(entries []Entry) []Entry {
 		}
 	}
 	if kept == nil {
-		return entries
+		return entries, nil
 	}
-	return kept
+	return kept, nil
 }
 
 // readMediaDir lists a media directory and drops the entries that the
-// upstream ignore rules exclude from resolution.
+// upstream ignore rules exclude from resolution: the IgnorePatterns ports in
+// ignoredPath and the .ignore files of dotIgnoreRule.
 func (s *Scanner) readMediaDir(path string) ([]Entry, error) {
 	entries, err := s.options.ReadDir(path)
 	if err != nil {
 		return nil, err
 	}
-	return withoutIgnoredEntries(entries), nil
+	return s.dotIgnore.filter(withoutIgnoredEntries(entries))
 }

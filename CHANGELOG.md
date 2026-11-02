@@ -104,6 +104,20 @@ v0.3.0 is the first public alpha of Deadfin.
   an album without a cover file takes the Primary image of its first track.
   Before, the embedded cover was never extracted, so an album without a
   `folder.jpg` had no image (#784, D-108).
+- A library scan gives a music track that has no Primary image its embedded
+  cover, also when the file did not change. Before, a track scanned before
+  #784 got its cover only on a full image refresh, so the album stayed
+  without a cover after an upgrade (#804, D-117).
+- A refresh with `ReplaceAllImages` keeps a stored image that no provider
+  replaces, as upstream does. Before, it removed every stored image, so an
+  album with a remote cover and no other source lost its cover (#804).
+- `GET /Items/{itemId}/RemoteImages` lists TheAudioDB for a music album
+  (Primary, Disc) by its MusicBrainz release-group ID, and for a music
+  artist (Primary, Logo, Banner, Backdrop) by its MusicBrainz artist ID, as
+  upstream `AudioDbAlbumImageProvider` and `AudioDbArtistImageProvider` do.
+  Before, no remote image provider supported music items, so a cover could
+  not be picked in the image editor. TheAudioDB needs `AUDIODB_API_KEY`
+  (D-11) (#807).
 - A library scan follows symbolic links, as upstream does. A linked media
   file or a linked directory, also one outside the library root, enters the
   library under the link path; before, the scan left every link out. A

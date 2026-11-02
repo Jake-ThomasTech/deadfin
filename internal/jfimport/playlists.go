@@ -88,15 +88,28 @@ func importMediaType(name string) item.MediaType {
 	return item.MediaTypeUnknown
 }
 
-// CollectionImporter writes one imported collection: it creates or finds the
-// BoxSet by name and links the children.
-type CollectionImporter interface {
-	ImportCollection(ctx context.Context, name string, children []dto.UUID) error
+// CollectionImport is one Jellyfin collection to import.
+type CollectionImport struct {
+	Name     string
+	Children []dto.UUID
+	// ProviderIDs are the collection's Jellyfin provider IDs (for example
+	// Tmdb, the TMDb collection ID).
+	ProviderIDs map[string]string
+	// Images are the collection's Jellyfin images.
+	Images []jellyfinsource.Image
 }
 
-// importCollections carries each Jellyfin collection (BoxSet) over by name.
-// Members match Deadfin items by path; unmatched members are counted and
-// dropped. A rerun finds the same BoxSet and links nothing twice.
+// CollectionImporter writes one imported collection: it creates or finds the
+// BoxSet by name, links the children, and keeps the provider IDs and
+// images. It returns a warning for each image it could not keep.
+type CollectionImporter interface {
+	ImportCollection(ctx context.Context, collection CollectionImport) ([]string, error)
+}
+
+// importCollections carries each Jellyfin collection (BoxSet) over by name,
+// with its provider IDs and images. Members match Deadfin items by path;
+// unmatched members are counted and dropped. A rerun finds the same BoxSet
+// and links nothing twice.
 func importCollections(ctx context.Context, src Source, importer CollectionImporter, index store.ImportMatchIndex, options Options, report *Report) error {
 	containers, ok := src.(ContainerSource)
 	if !ok || importer == nil {
@@ -125,9 +138,11 @@ func importCollections(ctx context.Context, src Source, importer CollectionImpor
 		if options.DryRun {
 			continue
 		}
-		if err := importer.ImportCollection(ctx, value.Name, children); err != nil {
+		warnings, err := importer.ImportCollection(ctx, CollectionImport{Name: value.Name, Children: children, ProviderIDs: value.ProviderIDs, Images: value.Images})
+		if err != nil {
 			return fmt.Errorf("import collection %q: %w", value.Name, err)
 		}
+		report.Warnings = append(report.Warnings, warnings...)
 	}
 	return nil
 }

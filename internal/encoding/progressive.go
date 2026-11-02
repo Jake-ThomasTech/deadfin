@@ -56,6 +56,11 @@ type EncodingJob struct {
 	// Hardware carries the encoding.xml acceleration and tone-mapping
 	// options. The zero value selects the software path.
 	Hardware HardwareOptions
+
+	// MaxWidth, when positive, replaces the fixed software scale with the
+	// maximum-width form of GetSwScaleFilter that image extraction requests.
+	// OutputWidth and OutputHeight still size a hardware scale.
+	MaxWidth int
 }
 
 // VideoStream, AudioStream, and SubtitleStream carry ffmpeg input stream

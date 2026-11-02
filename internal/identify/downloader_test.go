@@ -4,6 +4,7 @@ package identify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -75,25 +76,45 @@ func TestRejectNonGlobalUnicastAcceptsPublic(t *testing.T) {
 	}
 }
 
-// TestHardenedDownloaderRejectsHTTP verifies the downloader rejects non-HTTPS
-// URLs before making any request.
-func TestHardenedDownloaderRejectsHTTP(t *testing.T) {
+// TestHardenedDownloaderRejectsNonHTTPScheme verifies the downloader refuses
+// a scheme other than http(s) before making any request.
+func TestHardenedDownloaderRejectsNonHTTPScheme(t *testing.T) {
 	d := NewHardenedDownloader(5e9)
-	_, err := d.Fetch(context.Background(), "http://example.com/img.jpg")
-	if err == nil || !strings.Contains(err.Error(), "scheme must be https") {
-		t.Fatalf("Fetch(http) err = %v, want scheme rejection", err)
+	for _, raw := range []string{"file:///etc/passwd", "ftp://example.com/img.jpg", "gopher://example.com/"} {
+		_, err := d.Fetch(context.Background(), raw)
+		if !errors.Is(err, ErrImageRefused) || !strings.Contains(err.Error(), "scheme must be http or https") {
+			t.Errorf("Fetch(%q) err = %v, want ErrImageRefused scheme rejection", raw, err)
+		}
 	}
 }
 
-// TestHardenedDownloaderRejectsHTTPSRedirectToHTTP verifies a redirect from
-// HTTPS to HTTP is rejected (P1 security: redirect-downgrade rejection).
-func TestHardenedDownloaderRejectsHTTPSRedirectToHTTP(t *testing.T) {
+// TestHardenedDownloaderRefusesPrivateHTTP verifies a plain http URL passes
+// the scheme check and is then refused at dial time for a special-purpose
+// address (D-27).
+func TestHardenedDownloaderRefusesPrivateHTTP(t *testing.T) {
+	d := NewHardenedDownloader(5e9)
+	for _, raw := range []string{"http://127.0.0.1/img.jpg", "http://192.168.1.1/img.jpg", "http://[::1]/img.jpg"} {
+		_, err := d.Fetch(context.Background(), raw)
+		if !errors.Is(err, ErrImageRefused) || !strings.Contains(err.Error(), "special-purpose address") {
+			t.Errorf("Fetch(%q) err = %v, want ErrImageRefused special-purpose rejection", raw, err)
+		}
+	}
+}
+
+// TestHardenedDownloaderRedirectSchemes verifies redirects to http(s) are
+// followed (each hop is re-validated at dial time) and other schemes are
+// refused.
+func TestHardenedDownloaderRedirectSchemes(t *testing.T) {
 	client := newHardenedImageClient(5e9)
 	originalReq := &http.Request{URL: mustParse("https://example.com/img.jpg")}
-	redirectReq := &http.Request{URL: mustParse("http://downgrade.example.com/img.jpg")}
-	err := client.CheckRedirect(redirectReq, []*http.Request{originalReq})
-	if err == nil || !strings.Contains(err.Error(), "non-https scheme") {
-		t.Fatalf("CheckRedirect to http: err = %v, want non-https rejection", err)
+	for _, raw := range []string{"http://cdn.example.com/img.jpg", "https://cdn.example.com/img.jpg"} {
+		if err := client.CheckRedirect(&http.Request{URL: mustParse(raw)}, []*http.Request{originalReq}); err != nil {
+			t.Errorf("CheckRedirect(%q) err = %v, want nil", raw, err)
+		}
+	}
+	err := client.CheckRedirect(&http.Request{URL: mustParse("ftp://cdn.example.com/img.jpg")}, []*http.Request{originalReq})
+	if !errors.Is(err, ErrImageRefused) {
+		t.Errorf("CheckRedirect(ftp) err = %v, want ErrImageRefused", err)
 	}
 }
 
@@ -158,8 +179,8 @@ func TestHardenedDownloaderAcceptsImage(t *testing.T) {
 func TestHardenedDownloaderRejectsPrivateAddress(t *testing.T) {
 	d := NewHardenedDownloader(1e9)
 	_, err := d.Fetch(context.Background(), "https://10.0.0.1/img.jpg")
-	if err == nil {
-		t.Fatal("Fetch(10.0.0.1) err = nil, want dial error")
+	if !errors.Is(err, ErrImageRefused) {
+		t.Fatalf("Fetch(10.0.0.1) err = %v, want ErrImageRefused at dial time", err)
 	}
 }
 

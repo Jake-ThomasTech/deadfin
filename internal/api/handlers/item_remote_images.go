@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -188,12 +189,12 @@ func (h remoteImagesHandler) download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if query.Type == "" {
-		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		http.Error(w, "Type is required", http.StatusBadRequest)
 		return
 	}
 	imageType, ok := parseImageType(query.Type)
 	if !ok {
-		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		http.Error(w, "Type is not a valid ImageType", http.StatusBadRequest)
 		return
 	}
 	// 404 before work.
@@ -215,14 +216,27 @@ func (h remoteImagesHandler) download(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, identify.ErrItemNotFound):
 			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
-		case errors.Is(err, identify.ErrProvenanceRejected):
-			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		case errors.Is(err, identify.ErrInvalidImageURL):
+			http.Error(w, errorReason(err, identify.ErrInvalidImageURL), http.StatusBadRequest)
+		case errors.Is(err, identify.ErrImageRefused):
+			http.Error(w, "ImageUrl was refused: "+errorReason(err, identify.ErrImageRefused), http.StatusBadRequest)
 		default:
-			w.WriteHeader(http.StatusInternalServerError)
+			http.Error(w, "Image download failed: "+err.Error(), http.StatusInternalServerError)
 		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// errorReason returns the text that follows sentinel in err's message, so a
+// response body names the reason without the wrapping call chain.
+func errorReason(err, sentinel error) string {
+	msg := err.Error()
+	prefix := sentinel.Error() + ": "
+	if i := strings.LastIndex(msg, prefix); i >= 0 {
+		return msg[i+len(prefix):]
+	}
+	return msg
 }
 
 func remoteImageInfoToDTO(img providers.RemoteImageInfo) dto.RemoteImageInfo {

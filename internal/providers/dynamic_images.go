@@ -146,21 +146,49 @@ func (d *DynamicImages) RefreshDynamicImages(ctx context.Context, input library.
 	replacing := input.Image == library.RefreshModeFullRefresh && input.ReplaceAllImages
 	// downloaded lists the image types a provider set during this refresh.
 	// Deadfin's remote providers set remote image URLs inside the remote
-	// metadata stage, which runs before this pass.
+	// metadata stage, which runs before this pass. A local image stored with
+	// the media is not replaced either (ItemImageProvider.MergeImages).
 	downloaded := make(map[item.ImageType]bool)
 	if replacing {
-		for _, image := range target.ImageInfos {
-			if isRemoteImagePath(image.Path) {
-				downloaded[image.Type] = true
-			}
+		for _, imageType := range input.Supplied {
+			downloaded[imageType] = true
 		}
 	}
 	for _, provider := range d.enabledProviders(input.Options, *target, settings) {
+		if input.ChangedOnly && !providerChanged(provider, *target) {
+			continue
+		}
 		if err := d.refreshFromProvider(ctx, provider, input, target, settings, replacing, downloaded); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// itemChangeMonitor ports IHasItemChangeMonitor for a dynamic image
+// provider.
+type itemChangeMonitor interface {
+	HasChanged(target item.Item) bool
+}
+
+func providerChanged(provider dynamicImageProvider, target item.Item) bool {
+	monitor, ok := provider.(itemChangeMonitor)
+	return ok && monitor.HasChanged(target)
+}
+
+// DynamicImagesChanged implements library.DynamicImageChangeMonitor: it
+// reports whether a provider with an item change monitor supports stored and
+// reports a change.
+func (d *DynamicImages) DynamicImagesChanged(stored item.Item) bool {
+	if d == nil || d.options.Extractor == nil || d.options.MetadataPath == "" {
+		return false
+	}
+	for _, provider := range d.providers {
+		if provider.Supports(stored) && providerChanged(provider, stored) {
+			return true
+		}
+	}
+	return false
 }
 
 // enabledProviders ports GetImageProvidersInternal: the enabled providers in
@@ -548,6 +576,15 @@ func (audioImageExtractor) Supports(target item.Item) bool {
 		return false
 	}
 	return isLocalFileItem(target)
+}
+
+// HasChanged reports an item without a Primary image. Upstream
+// AudioImageProvider has no item change monitor, so a plain scan never runs
+// it for a refreshed track. Deadfin runs it on a scan for a track that has
+// no Primary image, so tracks scanned before the Image Extractor existed get
+// their embedded cover (D-117).
+func (audioImageExtractor) HasChanged(target item.Item) bool {
+	return !hasImageType(target.ImageInfos, item.ImageTypePrimary)
 }
 
 func (audioImageExtractor) SupportedImages(item.Item) []item.ImageType {
