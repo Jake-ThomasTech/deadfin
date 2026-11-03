@@ -5,7 +5,7 @@ ARG SOURCE_DATE_EPOCH
 # Renovate opens a bump pull request for each deadfin-web release. Release
 # order: tag deadfin-web, merge the bump, then tag deadfin (docs/releases.md).
 ARG DEADFIN_WEB_IMAGE=ghcr.io/deadfin-org/deadfin-web:v0.3.0@sha256:59ce839b64704544451140726f5d7529b39db0fb5e426bc00273c87aa544fc35
-FROM --platform=$BUILDPLATFORM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -48,7 +48,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # the Intel iHD VAAPI driver, oneVPL QSV runtime, and OpenCL filters for
 # hardware transcoding. Each release asset is pinned by SHA-256
 # (docs/06-risks.md: pinned version, clear startup error).
-FROM --platform=$BUILDPLATFORM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS jellyfin-ffmpeg
+FROM --platform=$BUILDPLATFORM golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS jellyfin-ffmpeg
 ARG TARGETARCH
 RUN case "$TARGETARCH" in amd64) digest=33b6defb6fcd26c366e1fe062aa52af8b0157a4003ce67a8b3ae6b54245ebb3d ;; arm64) digest=062efa04b8f0de43fd4951d18095eaf16b5690cecf5fc19243cf52d781dba362 ;; *) echo "unsupported target architecture: $TARGETARCH" >&2; exit 1 ;; esac && mkdir -p /out && curl --fail --silent --show-error --location --output /out/jellyfin-ffmpeg.deb "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.1-1/jellyfin-ffmpeg8_8.1.1-1-bookworm_${TARGETARCH}.deb" && echo "$digest  /out/jellyfin-ffmpeg.deb" | sha256sum --check --strict -
 
@@ -56,7 +56,7 @@ RUN case "$TARGETARCH" in amd64) digest=33b6defb6fcd26c366e1fe062aa52af8b0157a40
 # NuGet package, the version the pinned Jellyfin revision uses. skia-fetch
 # verifies the SHA-256 of the package and of the extracted library. Only the
 # tool's own files are copied, so source edits do not invalidate this layer.
-FROM --platform=$BUILDPLATFORM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS skiasharp
+FROM --platform=$BUILDPLATFORM golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS skiasharp
 ARG TARGETARCH
 WORKDIR /src
 COPY go.mod ./

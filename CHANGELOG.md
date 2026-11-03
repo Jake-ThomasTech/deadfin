@@ -13,6 +13,11 @@ newest release or release candidate. `:latest` follows the newest release.
 
 ## [Unreleased]
 
+### Security
+
+- The toolchain is Go 1.26.10. It fixes GO-2026-6809 in `crypto/x509`,
+  which the HTTPS server reaches through certificate verification.
+
 ## [0.3.0] - 2026-11-02
 
 v0.3.0 is the first public alpha of Deadfin.

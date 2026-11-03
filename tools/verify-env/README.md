@@ -58,7 +58,7 @@ x86_64 CI runner remains the sole attestation authority for
 
 ## Design
 
-- The gate image pins the same `golang:1.26.9-bookworm` digest as the
+- The gate image pins the same `golang:1.26.10-bookworm` digest as the
   Deadfin Dockerfile build stage. It adds ffmpeg, libvips-dev, python3,
   jq, golangci-lint v2.12.2, the exact .NET SDK 10.0.302, and the Docker CLI
   with buildx. It downloads exactly one of these immutable SDK artifacts and

@@ -283,7 +283,7 @@ Tested a client? Open a "Client compatibility report" issue.
 
 You need:
 
-- Go 1.26.9 with cgo
+- Go 1.26.10 with cgo
 - libvips development files and `pkg-config`
 - `ffmpeg` and `ffprobe` on `PATH` at run time. For hardware transcoding and
   tone mapping, use
