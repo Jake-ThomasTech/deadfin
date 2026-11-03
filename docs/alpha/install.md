@@ -34,7 +34,7 @@ ghcr.io/deadfin-org/deadfin:alpha
 the newest release (no `-rc.N`); the first one is v0.3.0. To control
 upgrades, pin a tag from the
 [tags page](https://github.com/deadfin-org/deadfin/tags), for example
-`ghcr.io/deadfin-org/deadfin:v0.3.0-rc.6`. Each tag is a multi-arch image
+`ghcr.io/deadfin-org/deadfin:v0.3.0`. Each tag is a multi-arch image
 (amd64 and arm64) with Jellyfin's FFmpeg build at `/usr/lib/jellyfin-ffmpeg`.
 
 The image is public. It ships the license texts of its third-party components

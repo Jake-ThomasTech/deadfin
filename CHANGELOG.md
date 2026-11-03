@@ -13,6 +13,8 @@ newest release or release candidate. `:latest` follows the newest release.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
 v0.3.0 is the first public alpha of Deadfin.
 
 ### Highlights
@@ -279,5 +281,6 @@ First release candidate for v0.3.0, the community alpha.
 - The SQLite query for folder played counts uses a faster plan on large
   libraries.
 
-[Unreleased]: https://github.com/deadfin-org/deadfin/compare/v0.3.0-rc.3...HEAD
+[Unreleased]: https://github.com/deadfin-org/deadfin/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/deadfin-org/deadfin/releases/tag/v0.3.0
 [0.3.0-rc.3]: https://github.com/deadfin-org/deadfin/releases/tag/v0.3.0-rc.3
