@@ -22,6 +22,9 @@ tools/difftool/difftool
 .difftool-media/
 tools/goldenrec/compose.difftool.yaml
 
+# Private Live TV test sources (docs/spikes/livetv.md §5.7). Never commit.
+/.livetv-dev/
+
 # Compiled binaries, test binaries, .NET build output, editor and OS files.
 *.test
 *.exe

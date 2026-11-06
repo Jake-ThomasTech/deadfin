@@ -2332,6 +2332,10 @@ func (s *Scanner) resolveFolder(ctx context.Context, task scanTask) (folderResol
 				return !ok || monitor.LocalMetadataChanged(refresh, *stored)
 			}, s.options.Now)
 			refresh.SkipRemoteMetadata = plan.skipRemote
+			refresh.RunRemoteImages = runsDynamicImages(itemRefresh, stored)
+			if stored != nil {
+				refresh.StoredImages = append([]item.ImageInfo(nil), stored.ImageInfos...)
+			}
 			runsDynamic, changedDynamic := false, false
 			if !s.remoteBackfill {
 				runsDynamic = runsDynamicImages(itemRefresh, stored)

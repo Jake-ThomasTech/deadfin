@@ -1,0 +1,32 @@
+{{- if eq .Values.mode "daemonset" }}
+{{- $selector := dict "app.kubernetes.io/name" (include "deadfin-worker.name" .) "app.kubernetes.io/instance" .Release.Name "app.kubernetes.io/component" "worker" }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "deadfin-worker.fullname" . }}
+  labels:
+    {{- include "deadfin-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml $selector | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        {{- toYaml $selector | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- $scheduling := dict "nodeSelector" .Values.nodeSelector "tolerations" .Values.tolerations "affinity" .Values.affinity }}
+      {{- include "deadfin-worker.pod" (dict "root" . "worker" .Values.worker "pools" .Values.daemonset.pools "ephemeral" false "scheduling" $scheduling) | nindent 6 }}
+{{- else if ne .Values.mode "deployment" }}
+{{- fail "mode must be daemonset or deployment" }}
+{{- end }}

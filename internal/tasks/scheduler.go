@@ -24,12 +24,15 @@ type Runnable interface {
 
 // Definition describes one scheduled task for registration.
 type Definition struct {
-	ID              string
-	Key             string
-	Name            string
-	Description     string
-	Category        string
-	Hidden          bool
+	ID          string
+	Key         string
+	Name        string
+	Description string
+	Category    string
+	Hidden      bool
+	// HiddenFunc, when set, decides IsHidden on every snapshot instead of
+	// Hidden (upstream IsHidden is a property read on each listing).
+	HiddenFunc      func() bool
 	DefaultTriggers []TriggerInfo
 }
 
@@ -729,6 +732,9 @@ func (s *Scheduler) doneWorker() {
 // snapshot returns a defensive copy of the task's current Info.
 func (t *task) snapshot() Info {
 	clone := t.info
+	if t.def.HiddenFunc != nil {
+		clone.IsHidden = t.def.HiddenFunc()
+	}
 	if clone.CurrentProgressPercentage != nil {
 		v := *clone.CurrentProgressPercentage
 		clone.CurrentProgressPercentage = &v

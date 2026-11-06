@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Package smoke of deadfin-worker (#623). Takes the deadfin binary from IMAGE,
+# builds the deb with nfpm, installs it with jellyfin-ffmpeg in a Debian
+# container that runs systemd, starts deadfin-worker.service, and checks
+# that the unit stays active and the worker runs. Usage:
+# deploy/packaging/package-smoke IMAGE [VERSION]
+set -euo pipefail
+
+image=${1:?image required}
+version=${2:-0.0.0~smoke}
+root=$(cd "$(dirname "$0")/../.." && pwd)
+work=$(mktemp -d)
+name="deadfin-package-smoke-$$"
+# nfpm v2.43.0 and the same Debian base and jellyfin-ffmpeg as the Dockerfile.
+nfpm_image=goreleaser/nfpm:v2.43.0@sha256:929e1056ba69bf1da57791e851d210e9d6d4f528fede53a55bd43cf85674450c
+debian_image=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
+arch=$(docker image inspect --format '{{.Architecture}}' "$image")
+case "$arch" in
+  amd64) ffmpeg_digest=33b6defb6fcd26c366e1fe062aa52af8b0157a4003ce67a8b3ae6b54245ebb3d ;;
+  arm64) ffmpeg_digest=062efa04b8f0de43fd4951d18095eaf16b5690cecf5fc19243cf52d781dba362 ;;
+  *) echo "package-smoke: unsupported architecture $arch" >&2; exit 1 ;;
+esac
+
+fail() {
+  echo "package-smoke: $*" >&2
+  docker exec "$name" journalctl --no-pager -u deadfin-worker -n 40 >&2 || true
+  exit 1
+}
+cleanup() {
+  docker rm -f "$name" "$name-extract" >/dev/null 2>&1 || true
+  docker image rm "$name" >/dev/null 2>&1 || true
+  rm -rf "$work"
+}
+trap cleanup EXIT
+
+docker create --name "$name-extract" "$image" >/dev/null
+mkdir -p "$work/dist"
+docker cp "$name-extract:/usr/local/bin/deadfin" "$work/dist/deadfin"
+docker rm "$name-extract" >/dev/null
+
+# Build in a Docker context, not a bind mount, so a Docker VM works too.
+mkdir -p "$work/deploy"
+cp -R "$root/deploy/packaging" "$work/deploy/packaging"
+cp "$root/LICENSE" "$work/LICENSE"
+cat >"$work/Dockerfile" <<DOCKERFILE
+FROM $nfpm_image AS package
+WORKDIR /src
+COPY . .
+ENV DEADFIN_VERSION=$version DEADFIN_ARCH=$arch
+RUN ["nfpm", "package", "--config", "deploy/packaging/nfpm.yaml", "--packager", "deb", "--target", "/deadfin-worker.deb"]
+
+FROM $debian_image
+RUN apt-get update && apt-get install --yes --no-install-recommends systemd systemd-sysv curl ca-certificates && \\
+    curl --fail --silent --show-error --location --output /tmp/jellyfin-ffmpeg.deb \\
+      "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.1-1/jellyfin-ffmpeg8_8.1.1-1-bookworm_$arch.deb" && \\
+    echo "$ffmpeg_digest  /tmp/jellyfin-ffmpeg.deb" | sha256sum --check --strict -
+COPY --from=package /deadfin-worker.deb /tmp/deadfin-worker.deb
+RUN apt-get install --yes --no-install-recommends /tmp/jellyfin-ffmpeg.deb /tmp/deadfin-worker.deb && rm -rf /var/lib/apt/lists/*
+CMD ["/lib/systemd/systemd"]
+DOCKERFILE
+docker build --quiet --tag "$name" "$work" >/dev/null
+
+docker run --detach --name "$name" --privileged --cgroupns=host \
+  -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock "$name" >/dev/null
+for _ in $(seq 30); do
+  state=$(docker exec "$name" systemctl is-system-running 2>/dev/null || true)
+  [[ $state == running || $state == degraded ]] && break
+  sleep 1
+done
+
+docker exec "$name" sh -c 'id deadfin-worker && test -f /etc/deadfin/worker.env && stat -c %U:%G /var/lib/deadfin-worker' | tr '\n' ' ' \
+  | grep -q 'deadfin-worker:deadfin-worker' || fail "the package did not create the user and state directory"
+# A server that is not there: the worker must start, log, and keep retrying.
+docker exec "$name" sh -c 'printf "%s\n" "DEADFIN_WORKER_SERVER=https://deadfin.invalid" \
+  "DEADFIN_WORKER_TOKEN=dfw1.c21va2V0ZXN0.c21va2Utc2VjcmV0LXNtb2tlLXNlY3JldC1zbW9rZS1zZWNyZXQ." \
+  "DEADFIN_WORKER_ARGS=-max-jobs=1" >/etc/deadfin/worker.env && systemctl enable --now deadfin-worker'
+sleep 5
+docker exec "$name" systemctl is-active --quiet deadfin-worker || fail "deadfin-worker.service is not active"
+docker exec "$name" journalctl --no-pager -u deadfin-worker | grep -q 'deadfin\[' || fail "the worker logged nothing"
+docker exec "$name" systemctl stop deadfin-worker
+echo "package-smoke: ok: deadfin-worker $version ($arch) installed, the unit started and stopped"

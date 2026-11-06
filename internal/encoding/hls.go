@@ -209,6 +209,13 @@ func appendHLSMapArgs(args []string, job EncodingJob) []string {
 // GetInputModifier and GetInputArgument (EncodingHelper.cs:1245-1349,
 // 7288-7400).
 func appendHLSInputArgs(args []string, job HLSJob, plan videoPlan) []string {
+	if job.LiveInput != nil {
+		args = appendLiveInputArgs(args, *job.LiveInput, job.OutputVideoCodec == "copy", plan.inputArgs)
+		if plan.hwDecoder {
+			args = append(args, "-noautoscale")
+		}
+		return args
+	}
 	if job.StartOffsetTicks > 0 {
 		if job.KeyframeCuts {
 			// The input seek lands on the start keyframe, and the copied
@@ -331,11 +338,11 @@ func appendHLSVideoArgs(args []string, job HLSJob, caps Capabilities, plan video
 	if job.OutputFrameRate > 0 {
 		args = append(args, "-r", formatFrameRate(job.OutputFrameRate))
 	}
+	args = append(args, "-preset", job.VideoQuality.Preset, "-crf", strconv.Itoa(job.VideoQuality.CRF))
+	if job.OutputVideoBitrate > 0 {
+		args = append(args, "-maxrate", strconv.Itoa(job.OutputVideoBitrate), "-bufsize", strconv.Itoa(job.OutputVideoBitrate*2))
+	}
 	args = append(args,
-		"-preset", job.VideoQuality.Preset,
-		"-crf", strconv.Itoa(job.VideoQuality.CRF),
-		"-maxrate", strconv.Itoa(job.OutputVideoBitrate),
-		"-bufsize", strconv.Itoa(job.OutputVideoBitrate*2),
 		"-x264opts:0", job.VideoQuality.X264Options,
 		"-force_key_frames:0", "expr:gte(t,n_forced*"+strconv.Itoa(job.SegmentLengthSeconds)+")",
 		"-sc_threshold:v:0", "0",

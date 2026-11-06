@@ -1,0 +1,47 @@
+#EXTM3U url-tvg="http://127.0.0.1:15004/xmltv.xml"
+#EXTINF:-1 tvg-id="fake-atsc.fake" tvg-name="FAKE-ATSC" tvg-logo="http://127.0.0.1:15004/logo/2.1.svg" tvg-chno="2.1" group-title="Broadcast",FAKE-ATSC
+http://127.0.0.1:15004/auto/v2.1
+#EXTINF:-1 tvg-id="fake-sd.fake" tvg-name="FAKE-SD" tvg-logo="http://127.0.0.1:15004/logo/2.2.svg" tvg-chno="2.2" group-title="Broadcast",FAKE-SD
+http://127.0.0.1:15004/auto/v2.2
+#EXTINF:-1 tvg-id="fake-h264.fake" tvg-name="FAKE-H264" tvg-logo="http://127.0.0.1:15004/logo/4.1.svg" tvg-chno="4.1" group-title="Cable",FAKE-H264
+http://127.0.0.1:15004/auto/v4.1
+#EXTINF:-1 tvg-id="fake-news.fake" tvg-name="FAKE-NEWS" tvg-logo="http://127.0.0.1:15004/logo/5.1.svg" tvg-chno="5.1" group-title="News",FAKE-NEWS
+http://127.0.0.1:15004/auto/v5.1
+#EXTINF:-1 tvg-id="fake-hevc.fake" tvg-name="FAKE-HEVC" tvg-logo="http://127.0.0.1:15004/logo/7.1.svg" tvg-chno="7.1" group-title="Broadcast",FAKE-HEVC
+http://127.0.0.1:15004/auto/v7.1
+#EXTINF:-1 tvg-id="fake-sports.fake" tvg-name="FAKE-SPORTS" tvg-logo="http://127.0.0.1:15004/logo/9.1.svg" tvg-chno="9.1" group-title="Sports",FAKE-SPORTS
+http://127.0.0.1:15004/auto/v9.1
+#EXTINF:-1 tvg-id="fault-slowstart.fake" tvg-name="FAULT-SLOWSTART" tvg-logo="http://127.0.0.1:15004/logo/900.1.svg" tvg-chno="900.1" group-title="Faults",FAULT-SLOWSTART
+http://127.0.0.1:15004/auto/v900.1
+#EXTINF:-1 tvg-id="fault-stall.fake" tvg-name="FAULT-STALL" tvg-logo="http://127.0.0.1:15004/logo/900.2.svg" tvg-chno="900.2" group-title="Faults",FAULT-STALL
+http://127.0.0.1:15004/auto/v900.2
+#EXTINF:-1 tvg-id="fault-die.fake" tvg-name="FAULT-DIE" tvg-logo="http://127.0.0.1:15004/logo/900.3.svg" tvg-chno="900.3" group-title="Faults",FAULT-DIE
+http://127.0.0.1:15004/auto/v900.3
+#EXTINF:-1 tvg-name="FAULT-CODEC" tvg-logo="http://127.0.0.1:15004/logo/900.4.svg" tvg-chno="900.4" group-title="Faults",FAULT-CODEC
+http://127.0.0.1:15004/auto/v900.4
+#EXTINF:-1 tvg-id="fault-bitrate.fake" tvg-name="FAULT-BITRATE" tvg-logo="http://127.0.0.1:15004/logo/900.5.svg" tvg-chno="900.5" group-title="Faults",FAULT-BITRATE
+http://127.0.0.1:15004/auto/v900.5
+#EXTINF:-1 tvg-id="fault-audio.fake" tvg-name="FAULT-AUDIO" tvg-logo="http://127.0.0.1:15004/logo/900.6.svg" tvg-chno="900.6" group-title="Faults",FAULT-AUDIO
+http://127.0.0.1:15004/auto/v900.6
+#EXTINF:-1 tvg-id="fault-resolution.fake" tvg-name="FAULT-RESOLUTION" tvg-logo="http://127.0.0.1:15004/logo/900.7.svg" tvg-chno="900.7" group-title="Faults",FAULT-RESOLUTION
+http://127.0.0.1:15004/auto/v900.7
+#EXTINF:-1 tvg-id="fault-hang.fake" tvg-name="FAULT-HANG" tvg-logo="http://127.0.0.1:15004/logo/900.8.svg" tvg-chno="900.8" group-title="Faults",FAULT-HANG
+http://127.0.0.1:15004/auto/v900.8
+#EXTINF:-1 tvg-id="fault-dead.fake" tvg-name="FAULT-DEAD" tvg-logo="http://127.0.0.1:15004/logo/900.9.svg" tvg-chno="900.9" group-title="Faults",FAULT-DEAD
+http://127.0.0.1:15004/auto/v900.9
+#EXTINF:-1 tvg-id="fast-clean.fake" tvg-name="FAST-CLEAN" tvg-logo="http://127.0.0.1:15004/logo/800.1.svg" tvg-chno="800.1" group-title="News",FAST-CLEAN
+http://127.0.0.1:15004/hls/800.1/master.m3u8
+#EXTINF:-1 tvg-id="fast-ssai.fake" tvg-name="FAST-SSAI" tvg-logo="http://127.0.0.1:15004/logo/800.2.svg" tvg-chno="800.2" group-title="News",FAST-SSAI
+http://127.0.0.1:15004/hls/800.2/master.m3u8
+#EXTINF:-1 tvg-id="fast-daterange.fake" tvg-name="FAST-DATERANGE" tvg-logo="http://127.0.0.1:15004/logo/800.3.svg" tvg-chno="800.3" group-title="News",FAST-DATERANGE
+http://127.0.0.1:15004/hls/800.3/master.m3u8
+#EXTINF:-1 tvg-id="fast-token.fake" tvg-name="FAST-TOKEN" tvg-logo="http://127.0.0.1:15004/logo/800.4.svg" tvg-chno="800.4" group-title="News",FAST-TOKEN
+http://127.0.0.1:15004/hls/800.4/master.m3u8?exp=1792198395&tok=9873c467e2822d19
+#EXTINF:-1 tvg-name="FAST-GEO" tvg-logo="http://127.0.0.1:15004/logo/800.5.svg" tvg-chno="800.5" group-title="News",FAST-GEO
+http://127.0.0.1:15004/hls/800.5/master.m3u8
+#EXTINF:-1 tvg-id="fast-jump.fake" tvg-name="FAST-JUMP" tvg-logo="http://127.0.0.1:15004/logo/800.6.svg" tvg-chno="800.6" group-title="News",FAST-JUMP
+http://127.0.0.1:15004/hls/800.6/master.m3u8
+#EXTINF:-1 tvg-id="fast-stale.fake" tvg-name="FAST-STALE" tvg-logo="http://127.0.0.1:15004/logo/800.7.svg" tvg-chno="800.7" group-title="News",FAST-STALE
+http://127.0.0.1:15004/hls/800.7/master.m3u8
+#EXTINF:-1 tvg-id="fast-all.fake" tvg-name="FAST-ALL" tvg-logo="http://127.0.0.1:15004/logo/800.8.svg" tvg-chno="800.8" group-title="News",FAST-ALL
+http://127.0.0.1:15004/hls/800.8/master.m3u8?exp=1792198575&tok=9600cf1b584fc674

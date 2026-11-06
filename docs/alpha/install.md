@@ -256,10 +256,25 @@ Any proxy that works for Jellyfin works for Deadfin. Forward WebSockets on
   Networking, or `network.xml`) before the first start. The one-time setup
   cookie is then `Secure` when the proxy sends `X-Forwarded-Proto: https`
   (D-53).
-- Client identity stays the proxy's address: every client behind the proxy
-  shares it. This affects the dashboard's client addresses, the
-  local-network bitrate rules, and the QuickConnect limit of 16 open
-  requests per address (D-55).
+- With the proxy in `KnownProxies`, Deadfin takes the client address from
+  `X-Forwarded-For`, as Jellyfin does. The header is read from the right:
+  each entry applies while the address that sent it is a known proxy, so
+  the client is the first address that is not. The proxy must set or
+  append `X-Forwarded-For` (Caddy, nginx and Traefik do). Deadfin does not
+  read `Forwarded` or `X-Real-IP`. A peer that is not in `KnownProxies`
+  cannot set the client address. Sessions, the activity log, the
+  local-network bitrate rules (`LocalNetworkSubnets`) and the QuickConnect
+  limit of 16 open requests per address (D-55) then see each client.
+- With `KnownProxies` empty, every client behind the proxy shows the
+  proxy's address.
+- Entries are addresses or CIDR subnets. A host name is ignored. A
+  non-empty list also trusts loopback (`127.0.0.0/8`, `::1`), as ASP.NET
+  Core does for Jellyfin.
+- The first-run wizard still needs the setup link through a proxy, whatever
+  `X-Forwarded-For` says (D-53).
+- With replicas (D-121), give every replica the same `KnownProxies`. A
+  replica that forwards a request sends the client's `X-Forwarded-For`
+  chain, so the owner sees the same client.
 - To serve Deadfin under a path such as `/jellyfin`, set the base URL in
   Dashboard → Networking and restart.
 
@@ -270,6 +285,57 @@ media.example.com {
     reverse_proxy deadfin:8096
 }
 ```
+
+## External access
+
+For access from outside your network, use HTTPS on TCP port **8920**, the
+default HTTPS port of Jellyfin:
+
+```
+https://media.example.com:8920
+```
+
+Use the same address on every device, at home and away, so that each device
+has one server entry.
+
+1. Point the name at your proxy. Public DNS gives your WAN address; your
+   local DNS gives the proxy's LAN address.
+2. On the router, forward TCP 8920 to port 8920 on the proxy. Keep ports 80
+   and 443 closed to the internet.
+3. Get the certificate with the ACME DNS challenge, because port 80 is
+   closed. Caddy needs the plugin for your DNS provider
+   (`caddy-dns/<provider>`).
+4. List the proxy in `KnownProxies` (see Reverse proxy above). Deadfin then
+   tells local clients from remote clients, and applies the remote bitrate
+   limits only to remote clients.
+
+Example (Caddy, with a DNS provider plugin):
+
+```
+media.example.com:8920, media.example.com {
+    tls {
+        dns <provider> {env.DNS_API_TOKEN}
+    }
+    reverse_proxy deadfin:8096
+}
+```
+
+Caddy completes a TLS handshake only for the names in the site address. A
+scanner that connects by IP address gets no certificate and no response from
+Deadfin. The second site address keeps port 443 for local devices that have
+an older entry without a port; omit it if nothing uses port 443.
+
+A port change only reduces scanner traffic. Internet scanners probe all
+ports. The protection is TLS, strong passwords, and the login limits.
+
+On a TV, enter the server address once. Then sign in with Quick Connect
+(turn it on in Dashboard → General):
+the TV shows a code, and a signed-in user approves it in the web client
+under the user menu, Quick Connect. Nobody types a password on the TV
+remote.
+
+If your ISP uses carrier-grade NAT (CGNAT), port forwarding cannot reach
+your network. Use a tunnel or a relay host with a public address instead.
 
 ## Hardware transcoding
 

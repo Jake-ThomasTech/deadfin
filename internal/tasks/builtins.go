@@ -41,6 +41,8 @@ const (
 	// RefreshAnimeSeedsID is the Deadfin anime seed task,
 	// derived the stock way from "Deadfin.Tasks.RefreshAnimeSeedsTask".
 	RefreshAnimeSeedsID = "edc2ff3797c351ef469e4ecbb1667ce1"
+	// RefreshGuideID is upstream Jellyfin.LiveTv.Guide.RefreshGuideScheduledTask.
+	RefreshGuideID = "bea9b218c97bbf98c5dc1303bdb9a0ca"
 )
 
 // Destructive task retention constants (upstream defaults).
@@ -109,6 +111,14 @@ type TrickplayRefresher interface {
 	Run(context.Context, func(float64)) error
 }
 
+// GuideRefresher runs one Live TV guide refresh (upstream
+// RefreshGuideScheduledTask). Hidden reports that no tuner is configured, so
+// the task is hidden, as upstream IsHidden is.
+type GuideRefresher interface {
+	RefreshGuide(context.Context, func(float64)) error
+	Hidden() bool
+}
+
 // BuiltinDeps carries the composition-root-injected dependencies for built-in
 // tasks. internal/tasks imports neither library, store, nor ffmpeg (no
 type BuiltinDeps struct {
@@ -125,6 +135,7 @@ type BuiltinDeps struct {
 	People                   PeopleRefresher
 	AnimeSeeds               AnimeSeedRefresher
 	Trickplay                TrickplayRefresher
+	Guide                    GuideRefresher
 	Clock                    clock.Clock // injected clock for retention cutoffs (spec §3: all timing through clock.Clock)
 	LogPath                  string
 	CachePath                string
@@ -169,6 +180,9 @@ func RegisterBuiltins(s *Scheduler, deps BuiltinDeps) error {
 	if deps.Trickplay != nil {
 		defs = append(defs, refreshTrickplayImagesTaskDef())
 	}
+	if deps.Guide != nil {
+		defs = append(defs, refreshGuideTaskDef())
+	}
 	for _, def := range defs {
 		run, ok := runnables[def.ID]
 		if !ok {
@@ -186,6 +200,9 @@ func RegisterBuiltins(s *Scheduler, deps BuiltinDeps) error {
 			Category:        def.Category,
 			Hidden:          def.Hidden,
 			DefaultTriggers: defaults[def.ID],
+		}
+		if def.ID == RefreshGuideID {
+			d.HiddenFunc = deps.Guide.Hidden
 		}
 		if err := s.Register(d, run); err != nil {
 			return err
@@ -239,6 +256,13 @@ func refreshAnimeSeedsTaskDef() taskDef {
 	return taskDef{ID: RefreshAnimeSeedsID, Key: "RefreshAnimeSeeds", Name: "Refresh Anime Seed Data", Description: "Downloads the offline anime datasets (manami, AniDB titles, Anime-Lists) at most once a day and rebuilds the anime id crosswalk.", Category: "Library"}
 }
 
+// refreshGuideTaskDef returns the upstream RefreshGuideScheduledTask
+// identity (RefreshGuideScheduledTask.cs). It registers only with a guide
+// refresher.
+func refreshGuideTaskDef() taskDef {
+	return taskDef{ID: RefreshGuideID, Key: "RefreshGuide", Name: "Refresh Guide", Description: "Downloads channel information from live tv services.", Category: "Live TV"}
+}
+
 // defaultTriggers returns the upstream default triggers per task ID. Every
 // stock task retains its upstream default triggers, including the honest
 // stubs — so the registered shape matches stock Jellyfin even where the
@@ -255,7 +279,8 @@ func defaultTriggers() map[string][]TriggerInfo {
 		// The seed fetcher itself enforces one request per source per day;
 		// the startup trigger loads the cached crosswalk early.
 		RefreshAnimeSeedsID:      {{Type: TriggerStartup}, {Type: TriggerInterval, IntervalTicks: interval(ticksPerDay)}},
-		RefreshTrickplayImagesID: {{Type: TriggerDaily, TimeOfDayTicks: ticks(3 * time.Hour)}}, // TrickplayImagesTask.cs GetDefaultTriggers
+		RefreshTrickplayImagesID: {{Type: TriggerDaily, TimeOfDayTicks: ticks(3 * time.Hour)}},    // TrickplayImagesTask.cs GetDefaultTriggers
+		RefreshGuideID:           {{Type: TriggerInterval, IntervalTicks: interval(ticksPerDay)}}, // RefreshGuideScheduledTask.cs GetDefaultTriggers
 		// Honest stubs (5) — upstream default triggers retained so the
 		// registered task shape matches stock (the backend is a no-op).
 		RefreshPeopleID:          {{Type: TriggerInterval, IntervalTicks: interval(7 * ticksPerDay)}},                                 // PeopleValidationTask.cs:86-89
@@ -288,6 +313,9 @@ func builtinsRunnables(deps BuiltinDeps) map[string]Runnable {
 	}
 	if deps.Trickplay != nil {
 		m[RefreshTrickplayImagesID] = deps.Trickplay
+	}
+	if deps.Guide != nil {
+		m[RefreshGuideID] = guideRunnable{deps.Guide}
 	}
 	if deps.StoreMaintainer != nil {
 		m[OptimizeDatabaseID] = &optimizeDatabaseRunnable{deps: deps}
@@ -353,6 +381,12 @@ type refreshAnimeSeedsRunnable struct{ deps BuiltinDeps }
 func (r *refreshAnimeSeedsRunnable) Run(ctx context.Context, progress func(float64)) error {
 	progress(0)
 	return r.deps.AnimeSeeds.Refresh(ctx, progress)
+}
+
+type guideRunnable struct{ GuideRefresher }
+
+func (r guideRunnable) Run(ctx context.Context, progress func(float64)) error {
+	return r.RefreshGuide(ctx, progress)
 }
 
 type optimizeDatabaseRunnable struct{ deps BuiltinDeps }

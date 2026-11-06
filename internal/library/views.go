@@ -34,8 +34,24 @@ type UserReader interface {
 // items and persisted user configuration. It is safe for concurrent callers
 // when its readers are safe.
 type Views struct {
-	items UserViewItemReader
-	users UserReader
+	items  UserViewItemReader
+	users  UserReader
+	liveTv LiveTvFolderSource
+}
+
+// LiveTvFolderSource supplies the Live TV folder. *livetv.Service
+// implements it.
+type LiveTvFolderSource interface {
+	// LiveTvFolder returns the folder; ok is false while Live TV has no
+	// tuner.
+	LiveTvFolder(ctx context.Context) (folder item.Item, ok bool, err error)
+}
+
+// WithLiveTv adds the Live TV folder to the views of users with Live TV
+// access.
+func (v *Views) WithLiveTv(source LiveTvFolderSource) *Views {
+	v.liveTv = source
+	return v
 }
 
 // NewViews constructs the view service over the required item and user read
@@ -84,6 +100,7 @@ type userViewPolicy struct {
 	EnableAllFolders    *bool      `json:"EnableAllFolders"`
 	EnabledFolders      []dto.UUID `json:"EnabledFolders"`
 	BlockedMediaFolders []dto.UUID `json:"BlockedMediaFolders"`
+	EnableLiveTvAccess  *bool      `json:"EnableLiveTvAccess"`
 }
 
 // Query returns persisted collection-folder views after applying
@@ -146,6 +163,17 @@ func (v *Views) Query(ctx context.Context, query UserViewsQuery) (UserViewsResul
 	}
 	views = append(views, groupedViews(movieGroup, item.CollectionTypeMovies, "Movies", user.ID, preset)...)
 	views = append(views, groupedViews(tvGroup, item.CollectionTypeTVShows, "TV Shows", user.ID, preset)...)
+	// UserViewManager.GetUserViews adds the Live TV folder for a user in
+	// LiveTvManager.GetEnabledUsers (UserViewManager.cs:117-134).
+	if query.IncludeExternalContent && v.liveTv != nil && (policy.EnableLiveTvAccess == nil || *policy.EnableLiveTvAccess) {
+		folder, ok, err := v.liveTv.LiveTvFolder(ctx)
+		if err != nil {
+			return UserViewsResult{}, err
+		}
+		if ok {
+			views = append(views, folderView(folder))
+		}
+	}
 	if !query.IncludeHidden {
 		excluded := idSet(configuration.MyMediaExcludes)
 		visible := views[:0]

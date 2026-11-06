@@ -23,7 +23,7 @@ var (
 	ErrProgressiveInvalid = errors.New("invalid progressive request")
 	// ErrProgressiveBackend identifies an incomplete or invalid progressive backend response.
 	ErrProgressiveBackend = errors.New("progressive backend failure")
-	// ErrProgressiveUnsupported identifies a valid request that cannot be fulfilled by A/V remux.
+	// ErrProgressiveUnsupported identifies a valid request that Deadfin cannot copy or transcode.
 	ErrProgressiveUnsupported = errors.New("unsupported progressive stream copy")
 )
 
@@ -117,7 +117,7 @@ type ProgressiveResponse struct {
 	OutputPath  string
 }
 
-// ProgressiveService is the focused local-file A/V copy/remux application seam.
+// ProgressiveService is the focused local-file progressive stream application seam.
 type ProgressiveService struct {
 	sources      DirectFileSourceService
 	transcodeDir string
@@ -126,7 +126,7 @@ type ProgressiveService struct {
 	audioVbr     func() bool
 }
 
-// NewProgressiveService creates the focused progressive A/V copy/remux service.
+// NewProgressiveService creates the focused progressive stream service.
 func NewProgressiveService(config ProgressiveServiceConfig) *ProgressiveService {
 	return &ProgressiveService{
 		sources:      config.Sources,
@@ -149,7 +149,9 @@ func NewProgressiveVideoService(config ProgressiveServiceConfig) *ProgressiveSer
 	return NewProgressiveService(config)
 }
 
-// OpenProgressive validates a local source for A/V stream copy, builds its pure encoding job, and opens one process.
+// OpenProgressive ports the progressive branch of VideosController.GetVideoStream
+// for a local source: it copies or transcodes each stream, builds its pure
+// encoding job, and opens one process.
 func (service *ProgressiveService) OpenProgressive(ctx context.Context, request ProgressiveRequest) (ProgressiveResponse, error) {
 	if err := validateProgressiveRequest(request); err != nil {
 		return ProgressiveResponse{}, err
@@ -166,8 +168,11 @@ func (service *ProgressiveService) OpenProgressive(ctx context.Context, request 
 	if err != nil {
 		return ProgressiveResponse{}, err
 	}
-	if !canCopyVideo(source, video, request, service.currentCapabilities()) || !canCopyAudio(audio, request) {
-		return ProgressiveResponse{}, ErrProgressiveUnsupported
+	caps := service.currentCapabilities()
+	copyVideo := canCopyVideo(source, video, request, caps)
+	copyAudio := canCopyAudio(audio, request)
+	if err := validateProgressiveTranscode(source, video, request, copyVideo, copyAudio, caps); err != nil {
+		return ProgressiveResponse{}, err
 	}
 	if !hasCanonicalSourceAuthority(source) {
 		return ProgressiveResponse{}, fmt.Errorf("%w: media source has incomplete canonical file authority", ErrProgressiveUnsupported)
@@ -175,15 +180,21 @@ func (service *ProgressiveService) OpenProgressive(ctx context.Context, request 
 
 	outputContainer, extension, contentType := progressiveOutput(request.Container)
 	job := progressiveEncodingJob(source, video, audio, outputContainer, progressiveRenditionIdentityOutputPath, request)
-	identityArgs, err := encoding.BuildProgressiveArgs(job, encoding.Capabilities{})
+	if !copyVideo {
+		progressiveVideoTranscode(&job, source, video, request)
+	}
+	if !copyAudio {
+		progressiveAudioTranscode(&job, audio, request)
+	}
+	identityArgs, err := encoding.BuildProgressiveArgs(job, caps)
 	if err != nil {
 		return ProgressiveResponse{}, fmt.Errorf("%w: build progressive family identity: %v", ErrProgressiveUnsupported, err)
 	}
 	outputPath := progressiveOutputPath(service.transcodeDir, request.UserAgent, request.DeviceID, request.PlaySessionID, source.SourceRevision, identityArgs, extension)
 	job.OutputPath = outputPath
-	args, err := encoding.BuildProgressiveArgs(job, encoding.Capabilities{})
+	args, err := encoding.BuildProgressiveArgs(job, caps)
 	if err != nil {
-		return ProgressiveResponse{}, fmt.Errorf("%w: build progressive copy job: %v", ErrProgressiveUnsupported, err)
+		return ProgressiveResponse{}, fmt.Errorf("%w: build progressive job: %v", ErrProgressiveUnsupported, err)
 	}
 
 	response := ProgressiveResponse{ContentType: contentType, OutputPath: outputPath}
@@ -241,7 +252,7 @@ func validateProgressiveRequest(request ProgressiveRequest) error {
 	if request.SubtitleStreamIndex != nil && *request.SubtitleStreamIndex < -1 {
 		return fmt.Errorf("%w: invalid subtitle stream index", ErrProgressiveInvalid)
 	}
-	if request.Container != "ts" && request.Container != "fmp4" && request.Container != "mp4" {
+	if request.Container != "ts" && request.Container != "fmp4" && request.Container != "mp4" && request.Container != "mkv" {
 		return fmt.Errorf("%w: output container %q", ErrProgressiveInvalid, request.Container)
 	}
 	return nil
@@ -653,6 +664,8 @@ func progressiveOutput(container string) (outputContainer, extension, contentTyp
 		return "ts", ".ts", "video/mp2t"
 	case "fmp4":
 		return "fmp4", ".fmp4", "video/mp4"
+	case "mkv":
+		return "mkv", ".mkv", "video/x-matroska"
 	default: // validateProgressiveRequest has already limited this to the mp4 alias.
 		return "fmp4", ".mp4", "video/mp4"
 	}
@@ -770,4 +783,55 @@ func audioChannels(audio *MediaStream) int {
 		return 0
 	}
 	return intPointerValue(audio.Channels)
+}
+
+// validateProgressiveTranscode refuses a progressive request that Deadfin's
+// encoders cannot satisfy. A progressive video transcode encodes H.264 with
+// libx264 and AAC audio (D-50), and burns in no subtitle (D-126).
+func validateProgressiveTranscode(source MediaSourceInfo, video *MediaStream, request ProgressiveRequest, copyVideo, copyAudio bool, caps encoding.Capabilities) error {
+	if !copyVideo {
+		if len(request.VideoCodecs) != 0 && !containsProgressiveCodec(request.VideoCodecs, "h264") {
+			return fmt.Errorf("%w: progressive encoder cannot satisfy requested video codecs", ErrProgressiveUnsupported)
+		}
+		if caps.H264Encoder != "libx264" {
+			return fmt.Errorf("%w: progressive video transcode requires libx264", ErrProgressiveUnsupported)
+		}
+		if progressiveSubtitleEncodeRequested(request) {
+			return fmt.Errorf("%w: progressive video transcode cannot burn in subtitles", ErrProgressiveUnsupported)
+		}
+	}
+	if !copyAudio && len(request.AudioCodecs) != 0 && !containsProgressiveCodec(request.AudioCodecs, "aac") {
+		return fmt.Errorf("%w: progressive encoder cannot satisfy requested audio codecs", ErrProgressiveUnsupported)
+	}
+	return nil
+}
+
+// progressiveVideoTranscode sets the H.264 output of a progressive video
+// transcode: the bitrate, profile and size decisions of
+// StreamingHelpers.GetStreamingState that the HLS path also uses.
+func progressiveVideoTranscode(job *encoding.EncodingJob, source MediaSourceInfo, video *MediaStream, request ProgressiveRequest) {
+	job.OutputVideoCodec = "h264"
+	job.OutputVideoBitrate = hlsOutputVideoBitrate(video, request, job.OutputVideoCodec)
+	if job.OutputVideoBitrate == 0 {
+		job.OutputVideoBitrate = intPointerValue(source.FallbackMaxStreamingBitrate)
+	}
+	job.OutputVideoProfile, job.OutputVideoLevel = hlsH264OutputConstraints(request)
+	job.VideoQuality = encoding.VideoQuality{
+		Preset:                "veryfast",
+		CRF:                   23,
+		ForcedKeyFrameSeconds: 3,
+		X264Options:           "subme=0:me_range=16:rc_lookahead=10:me=hex:open_gop=0",
+	}
+	hlsApplyResolutionNormalizer(job, video, HLSRequest{ProgressiveRequest: request})
+}
+
+// progressiveAudioTranscode sets the AAC output of a progressive transcode
+// (EncodingHelper.GetAudioBitrateParam and GetNumAudioChannelsParam).
+func progressiveAudioTranscode(job *encoding.EncodingJob, audio *MediaStream, request ProgressiveRequest) {
+	job.OutputAudioCodec = "aac"
+	job.OutputAudioChannels = hlsOutputAudioChannels(audio.Channels, progressiveAudioChannels(request))
+	job.OutputAudioBitrate = encoding.AudioBitrate(request.AudioBitrate, job.OutputAudioCodec, intPointerValue(audio.Channels), job.OutputAudioChannels)
+	if request.AudioSampleRate != nil && *request.AudioSampleRate > 0 {
+		job.OutputAudioSampleRate = *request.AudioSampleRate
+	}
 }

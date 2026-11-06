@@ -1086,3 +1086,34 @@ func awaitSidecarResult(t *testing.T, result <-chan error, operation string) {
 		t.Fatalf("%s did not complete: %v", operation, t.Context().Err())
 	}
 }
+
+// TestTranscodingThrottlerMeasuresUndownloadedLeadFromFamilyStart checks that
+// a family restarted by a seek is not paused before its first segment is
+// served (#858). The absolute position after a seek is far past the threshold,
+// but the lead over the family start is not.
+func TestTranscodingThrottlerMeasuresUndownloadedLeadFromFamilyStart(t *testing.T) {
+	ticks := func(seconds int) int64 { return int64(time.Duration(seconds) * time.Second / 100) }
+	throttler := newTranscodingThrottler(throttlerOptions{
+		Threshold:          time.Minute,
+		SegmentLengthTicks: ticks(6),
+	})
+	for _, test := range []struct {
+		name  string
+		state throttlerState
+		want  bool
+	}{
+		{"seek restart before the first segment", throttlerState{StartTimeTicks: ticks(1158), TranscodingPositionTicks: ticks(1171)}, false},
+		{"seek restart 60s ahead without a download", throttlerState{StartTimeTicks: ticks(1158), TranscodingPositionTicks: ticks(1218)}, true},
+		{"start at zero 60s ahead without a download", throttlerState{TranscodingPositionTicks: ticks(60)}, true},
+		{"start at zero below the threshold", throttlerState{TranscodingPositionTicks: ticks(59)}, false},
+		{"seek restart after a download", throttlerState{StartTimeTicks: ticks(1158), DownloadPositionTicks: ticks(1164), TranscodingPositionTicks: ticks(1224)}, true},
+	} {
+		if got := throttler.shouldPause(test.state); got != test.want {
+			t.Errorf("%s: shouldPause = %v, want %v", test.name, got, test.want)
+		}
+	}
+	short := newTranscodingThrottler(throttlerOptions{Threshold: time.Minute, SegmentLengthTicks: ticks(40)})
+	if short.shouldPause(throttlerState{TranscodingPositionTicks: ticks(70)}) {
+		t.Fatal("shouldPause = true with less than two segments written ahead of the family start")
+	}
+}

@@ -162,8 +162,12 @@ type Options struct {
 	InactiveSessionThreshold func() int
 	OnIdlePlayback           func(context.Context, Snapshot, PlaybackState) error
 	OnInactivePlayback       func(context.Context, Snapshot, PlaybackState) error
-	OnSessionStarted         func(context.Context, Snapshot)
-	OnSessionEnded           func(context.Context, Snapshot)
+	// CloseLiveStream releases one consumer of an open live stream
+	// (MediaSourceManager.CloseLiveStream). Nil keeps live streams open
+	// until their own idle timeout.
+	CloseLiveStream  func(ctx context.Context, liveStreamID string) error
+	OnSessionStarted func(context.Context, Snapshot)
+	OnSessionEnded   func(context.Context, Snapshot)
 }
 
 // lifecycleEvent is a session creation or removal that waits for the
@@ -213,7 +217,20 @@ type Manager struct {
 	changes        *events.Bus[Change]
 	controllers    map[string]int
 	progress       map[string]*progressWorker
-	lifecycle      []lifecycleEvent
+	// dirty holds the IDs of sessions changed or removed since the last
+	// TakeChanges, while persistence is on (#620).
+	dirty         map[string]struct{}
+	persistNotify chan struct{}
+	// liveStreams maps a live stream id to the sessions that play it:
+	// session id to play session id and play session id to session id
+	// (SessionManager._activeLiveStreamSessions).
+	liveStreams map[string]map[string]string
+	// switched holds, per live stream, the session and play session ids
+	// whose consumer a channel switch released (D-92). A later stop report
+	// for the pair releases nothing, and start and progress reports do not
+	// track the stream again for SwitchReleaseHold.
+	switched  map[string]map[string]switchMark
+	lifecycle []lifecycleEvent
 }
 
 type progressWorker struct {
@@ -243,6 +260,8 @@ func NewWithOptions(c clock.Clock, options Options) *Manager {
 		changes:     events.NewBus[Change](c),
 		controllers: make(map[string]int),
 		progress:    make(map[string]*progressWorker),
+		liveStreams: make(map[string]map[string]string),
+		switched:    make(map[string]map[string]switchMark),
 	}
 	idleTimer := c.NewTimer(5 * time.Minute)
 	inactiveTimer := c.NewTimer(time.Minute)
@@ -439,6 +458,7 @@ func (manager *Manager) StartPlaybackWithRevision(_ context.Context, target Targ
 	}
 	manager.updatePlayback(snapshot, state, manager.clock.Now())
 	manager.restartProgressLocked(snapshot)
+	manager.trackLiveStreamLocked(state.LiveStreamID, snapshot.ID, state.PlaySessionID)
 	manager.publishChangeLocked(snapshot.ID, ChangePlayback, true)
 	return manager.nextPlaybackReportRevisionLocked(snapshot), nil
 }
@@ -465,6 +485,7 @@ func (manager *Manager) ProgressPlaybackWithRevision(_ context.Context, target T
 	}
 	manager.updatePlayback(snapshot, state, manager.clock.Now())
 	manager.restartProgressLocked(snapshot)
+	manager.trackLiveStreamLocked(state.LiveStreamID, snapshot.ID, state.PlaySessionID)
 	manager.publishChangeLocked(snapshot.ID, ChangePlayback, false)
 	return manager.nextPlaybackReportRevisionLocked(snapshot), true, nil
 }
@@ -478,21 +499,30 @@ func (manager *Manager) StopPlayback(ctx context.Context, target Target, state P
 
 // StopPlaybackWithRevision records terminal playback and returns the revision
 // that identifies this accepted report until a later report or target replaces it.
-func (manager *Manager) StopPlaybackWithRevision(_ context.Context, target Target, state PlaybackState) (uint64, error) {
+func (manager *Manager) StopPlaybackWithRevision(ctx context.Context, target Target, state PlaybackState) (uint64, error) {
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	if manager.closed {
+		manager.mu.Unlock()
 		return 0, ErrClosed
 	}
 	snapshot, found := manager.snapshotForTargetLocked(target)
 	if !found {
+		manager.mu.Unlock()
 		return 0, ErrNotFound
 	}
 	manager.updatePlaybackProjection(snapshot, state)
 	manager.stopProgressLocked(snapshot.ID)
 	snapshot.NowPlaying = nil
 	manager.publishChangeLocked(snapshot.ID, ChangePlayback, true)
-	return manager.nextPlaybackReportRevisionLocked(snapshot), nil
+	revision := manager.nextPlaybackReportRevisionLocked(snapshot)
+	var closing []string
+	if state.LiveStreamID != "" && manager.untrackLiveStreamLocked(state.LiveStreamID, snapshot.ID) {
+		closing = append(closing, state.LiveStreamID)
+	}
+	closeLiveStream := manager.options.CloseLiveStream
+	manager.mu.Unlock()
+	closeLiveStreams(ctx, closeLiveStream, closing)
+	return revision, nil
 }
 
 func (manager *Manager) updatePlayback(snapshot *Snapshot, state PlaybackState, now time.Time) {
@@ -535,6 +565,7 @@ func (manager *Manager) SetPlaybackRuntime(target Target, runTimeTicks *int64) b
 		value := *runTimeTicks
 		snapshot.NowPlaying.RunTimeTicks = &value
 	}
+	manager.markDirtyLocked(snapshot.ID)
 	return true
 }
 
@@ -703,31 +734,247 @@ func (manager *Manager) DeviceProfile(client, deviceID string) ([]byte, bool) {
 	return append([]byte(nil), snapshot.Capabilities.DeviceProfile...), true
 }
 
-// Remove drops the session identified by id.
+// Remove drops the session identified by id and closes the live streams
+// it still plays (SessionManager.CloseIfNeededAsync).
 func (manager *Manager) Remove(id string) bool {
 	manager.mu.Lock()
-	defer manager.unlockAndNotify()
 	if manager.closed {
+		manager.unlockAndNotify()
 		return false
 	}
 	key, found := manager.byID[id]
 	if !found {
+		manager.unlockAndNotify()
 		return false
 	}
-	manager.removeLocked(key, id)
+	closing := manager.removeLocked(key, id)
+	closeLiveStream := manager.options.CloseLiveStream
+	manager.unlockAndNotify()
+	closeLiveStreams(manager.ctx, closeLiveStream, closing)
 	return true
 }
 
-// removeLocked must run under a lock that unlockAndNotify releases.
-func (manager *Manager) removeLocked(key sessionKey, id string) {
+// removeLocked drops one session and returns the live streams that no
+// other session plays. It must run under a lock that unlockAndNotify
+// releases.
+func (manager *Manager) removeLocked(key sessionKey, id string) []string {
 	if snapshot, found := manager.byKey[key]; found {
 		manager.lifecycle = append(manager.lifecycle, lifecycleEvent{snapshot: cloneSnapshot(*snapshot)})
+	}
+	var closing []string
+	for liveStreamID, sessions := range manager.liveStreams {
+		if _, plays := sessions[id]; plays && manager.untrackLiveStreamLocked(liveStreamID, id) {
+			closing = append(closing, liveStreamID)
+		}
+	}
+	sort.Strings(closing)
+	for liveStreamID := range manager.switched {
+		manager.clearSwitchedLocked(liveStreamID, id)
 	}
 	delete(manager.byID, id)
 	delete(manager.byKey, key)
 	delete(manager.controllers, id)
 	manager.stopProgressLocked(id)
 	manager.publishChangeLocked(id, ChangeRemoved, true)
+	return closing
+}
+
+// CloseLiveStreamIfNeeded releases one consumer of a live stream for a
+// session or play session that stops playing it
+// (SessionManager.CloseLiveStreamIfNeededAsync).
+func (manager *Manager) CloseLiveStreamIfNeeded(ctx context.Context, liveStreamID, sessionOrPlaySessionID string) {
+	if liveStreamID == "" {
+		return
+	}
+	manager.mu.Lock()
+	if manager.closed {
+		manager.mu.Unlock()
+		return
+	}
+	release := manager.untrackLiveStreamLocked(liveStreamID, sessionOrPlaySessionID)
+	closeLiveStream := manager.options.CloseLiveStream
+	manager.mu.Unlock()
+	if release {
+		closeLiveStreams(ctx, closeLiveStream, []string{liveStreamID})
+	}
+}
+
+// SwitchReleaseHold is how long after a channel switch released a stream
+// the device's start and progress reports of that stream are ignored, so a
+// report that was in flight across the switch does not track the stream
+// again (D-92). It matches the broker's idle close.
+const SwitchReleaseHold = 60 * time.Second
+
+// switchMark is a session or play session whose consumer of a live stream
+// a channel switch released.
+type switchMark struct {
+	partner string
+	device  string
+	until   time.Time
+}
+
+// ReleaseDeviceLiveStreams releases, before a device opens another live
+// stream, the live streams that the device's sessions play and for which
+// release reports true (D-92). Each release is the release a stop report
+// would do: the session stops counting as a viewer, and a stream that no
+// other session plays loses one consumer. A later stop or progress report
+// of a released stream does nothing. A start or progress report of it
+// tracks it again only after SwitchReleaseHold, or after the device opens
+// the stream again (ReopenDeviceLiveStream). release runs under the
+// registry lock and must not call the manager.
+func (manager *Manager) ReleaseDeviceLiveStreams(ctx context.Context, deviceID string, release func(liveStreamID string) bool) {
+	if deviceID == "" || release == nil {
+		return
+	}
+	manager.mu.Lock()
+	if manager.closed {
+		manager.mu.Unlock()
+		return
+	}
+	var closing []string
+	for liveStreamID, sessions := range manager.liveStreams {
+		for id, key := range manager.byID {
+			if !strings.EqualFold(key.deviceID, deviceID) {
+				continue
+			}
+			playSessionID, plays := sessions[id]
+			if !plays || !release(liveStreamID) {
+				continue
+			}
+			if manager.untrackLiveStreamLocked(liveStreamID, id) {
+				closing = append(closing, liveStreamID)
+			}
+			marks := manager.switched[liveStreamID]
+			if marks == nil {
+				marks = make(map[string]switchMark)
+				manager.switched[liveStreamID] = marks
+			}
+			until := manager.clock.Now().Add(SwitchReleaseHold)
+			marks[id] = switchMark{partner: playSessionID, device: key.deviceID, until: until}
+			if playSessionID != "" {
+				marks[playSessionID] = switchMark{partner: id, device: key.deviceID, until: until}
+			}
+		}
+	}
+	sort.Strings(closing)
+	closeLiveStream := manager.options.CloseLiveStream
+	manager.mu.Unlock()
+	closeLiveStreams(ctx, closeLiveStream, closing)
+}
+
+// ReopenDeviceLiveStream drops the switch marks of a device on a live
+// stream after the device opened the stream again, so its next start report
+// tracks the new consumer (D-92).
+func (manager *Manager) ReopenDeviceLiveStream(deviceID, liveStreamID string) {
+	if deviceID == "" || liveStreamID == "" {
+		return
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	for id, mark := range manager.switched[liveStreamID] {
+		if strings.EqualFold(mark.device, deviceID) {
+			manager.clearSwitchedLocked(liveStreamID, id)
+		}
+	}
+}
+
+// clearSwitchedLocked drops the switch mark of a session or play session
+// on a live stream, with its partner id, and reports whether there was one.
+func (manager *Manager) clearSwitchedLocked(liveStreamID, sessionOrPlaySessionID string) bool {
+	marks := manager.switched[liveStreamID]
+	mark, found := marks[sessionOrPlaySessionID]
+	if !found {
+		return false
+	}
+	delete(marks, sessionOrPlaySessionID)
+	if mark.partner != "" {
+		delete(marks, mark.partner)
+	}
+	if len(marks) == 0 {
+		delete(manager.switched, liveStreamID)
+	}
+	return true
+}
+
+// trackLiveStreamLocked records that a session plays a live stream
+// (SessionManager.UpdateLiveStreamActiveSessionMappings). A report of a
+// stream that a switch released less than SwitchReleaseHold ago is ignored
+// (D-92).
+func (manager *Manager) trackLiveStreamLocked(liveStreamID, sessionID, playSessionID string) {
+	if liveStreamID == "" {
+		return
+	}
+	if marks := manager.switched[liveStreamID]; marks != nil {
+		mark, switched := marks[sessionID]
+		if !switched && playSessionID != "" {
+			mark, switched = marks[playSessionID]
+		}
+		if switched {
+			if manager.clock.Now().Before(mark.until) {
+				return
+			}
+			manager.clearSwitchedLocked(liveStreamID, sessionID)
+			if playSessionID != "" {
+				manager.clearSwitchedLocked(liveStreamID, playSessionID)
+			}
+		}
+	}
+	sessions := manager.liveStreams[liveStreamID]
+	if sessions == nil {
+		sessions = make(map[string]string)
+		manager.liveStreams[liveStreamID] = sessions
+	}
+	if playSessionID == "" {
+		if _, found := sessions[sessionID]; !found {
+			sessions[sessionID] = ""
+		}
+		return
+	}
+	if current, found := sessions[sessionID]; !found || current != playSessionID {
+		if current != "" {
+			delete(sessions, current)
+		}
+		sessions[sessionID] = playSessionID
+		sessions[playSessionID] = sessionID
+	}
+}
+
+// untrackLiveStreamLocked removes a session or play session from a live
+// stream and reports whether to release one consumer of the stream
+// (SessionManager.CloseLiveStreamIfNeededAsync). A stream with no recorded
+// session is released, as upstream does.
+func (manager *Manager) untrackLiveStreamLocked(liveStreamID, sessionOrPlaySessionID string) bool {
+	if manager.clearSwitchedLocked(liveStreamID, sessionOrPlaySessionID) {
+		return false
+	}
+	sessions, found := manager.liveStreams[liveStreamID]
+	if !found {
+		return true
+	}
+	release := false
+	if other, found := sessions[sessionOrPlaySessionID]; found {
+		delete(sessions, sessionOrPlaySessionID)
+		if other != "" {
+			delete(sessions, other)
+		}
+		release = true
+	}
+	if len(sessions) == 0 {
+		delete(manager.liveStreams, liveStreamID)
+	}
+	return release
+}
+
+// closeLiveStreams runs the close hook without the registry lock. A close
+// failure is not the caller's failure; the stream's idle timeout still
+// applies.
+func closeLiveStreams(ctx context.Context, closeLiveStream func(context.Context, string) error, ids []string) {
+	if closeLiveStream == nil {
+		return
+	}
+	for _, id := range ids {
+		_ = closeLiveStream(ctx, id)
+	}
 }
 
 // EndDeviceSessions removes every session whose device ID matches deviceID
@@ -735,18 +982,21 @@ func (manager *Manager) removeLocked(key sessionKey, id string) {
 // It ports the session loop of SessionManager.Logout(Device).
 func (manager *Manager) EndDeviceSessions(deviceID string) []string {
 	manager.mu.Lock()
-	defer manager.unlockAndNotify()
 	if manager.closed {
+		manager.unlockAndNotify()
 		return nil
 	}
-	var ended []string
+	var ended, closing []string
 	for key, snapshot := range manager.byKey {
 		if !strings.EqualFold(snapshot.DeviceID, deviceID) {
 			continue
 		}
 		ended = append(ended, snapshot.ID)
-		manager.removeLocked(key, snapshot.ID)
+		closing = append(closing, manager.removeLocked(key, snapshot.ID)...)
 	}
+	closeLiveStream := manager.options.CloseLiveStream
+	manager.unlockAndNotify()
+	closeLiveStreams(manager.ctx, closeLiveStream, closing)
 	sort.Strings(ended)
 	return ended
 }
@@ -773,6 +1023,8 @@ func (manager *Manager) Close() error {
 	manager.byID = nil
 	manager.controllers = nil
 	manager.progress = nil
+	manager.liveStreams = nil
+	manager.switched = nil
 	manager.mu.Unlock()
 	manager.wg.Wait()
 	return manager.changes.Close(context.Background())
@@ -796,6 +1048,7 @@ func (manager *Manager) unlockAndNotify() {
 }
 
 func (manager *Manager) publishChangeLocked(id string, kind ChangeKind, force bool) {
+	manager.markDirtyLocked(id)
 	manager.changes.Publish(Change{SessionID: id, Kind: kind, Force: force})
 }
 

@@ -21,12 +21,14 @@ import (
 //   - network: MediaBrowser.Common/Net/NetworkConfigurationStore.cs
 //   - metadata: MediaBrowser.Controller/Library/MetadataConfigurationStore.cs
 //   - encoding: MediaBrowser.MediaEncoding/Configuration/EncodingConfigurationStore.cs
+//   - livetv: src/Jellyfin.LiveTv/Configuration/LiveTvConfigurationFactory.cs
 //   - xbmcmetadata: MediaBrowser.XbmcMetadata/Configuration/NfoConfigurationFactory.cs
 const (
 	KeyBranding = "branding"
 	KeyNetwork  = "network"
 	KeyMetadata = "metadata"
 	KeyEncoding = "encoding"
+	KeyLiveTv   = "livetv"
 
 	KeyXbmcMetadata = "xbmcmetadata"
 )
@@ -38,6 +40,7 @@ const (
 	NetworkFile  = KeyNetwork + ".xml"
 	MetadataFile = KeyMetadata + ".xml"
 	EncodingFile = KeyEncoding + ".xml"
+	LiveTvFile   = KeyLiveTv + ".xml"
 
 	XbmcMetadataFile = KeyXbmcMetadata + ".xml"
 )
@@ -71,6 +74,8 @@ func (manager *Manager) NamedConfiguration(key string) (any, error) {
 		return manager.Metadata(), nil
 	case KeyEncoding:
 		return manager.Encoding(), nil
+	case KeyLiveTv:
+		return manager.LiveTv(), nil
 	case KeyXbmcMetadata:
 		return manager.XbmcMetadata(), nil
 	}
@@ -122,6 +127,20 @@ func (manager *Manager) SaveNamedConfiguration(ctx context.Context, key string, 
 			if err := validateEncodingOptions(*options, posted); err != nil {
 				return err
 			}
+			if posted.AllowPlainHttpTranscodeWorkers == nil && options.AllowPlainHttpTranscodeWorkers != nil {
+				value := *options.AllowPlainHttpTranscodeWorkers
+				posted.AllowPlainHttpTranscodeWorkers = &value
+			}
+			*options = posted
+			return nil
+		})
+	case KeyLiveTv:
+		var posted LiveTvOptions
+		if err := posted.UnmarshalJSON(data); err != nil {
+			return err
+		}
+		return manager.UpdateLiveTv(ctx, func(options *LiveTvOptions) error {
+			posted.keepDeadfinFields(*options)
 			*options = posted
 			return nil
 		})

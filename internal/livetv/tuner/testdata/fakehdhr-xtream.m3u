@@ -1,0 +1,41 @@
+#EXTM3U
+#EXTINF:-1 tvg-id="fake-atsc.fake" tvg-name="FAKE-ATSC" tvg-logo="http://127.0.0.1:15004/logo/2.1.svg" group-title="Broadcast",FAKE-ATSC
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10000.ts
+#EXTINF:-1 tvg-id="fake-sd.fake" tvg-name="FAKE-SD" tvg-logo="http://127.0.0.1:15004/logo/2.2.svg" group-title="Broadcast",FAKE-SD
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10001.ts
+#EXTINF:-1 tvg-id="fake-h264.fake" tvg-name="FAKE-H264" tvg-logo="http://127.0.0.1:15004/logo/4.1.svg" group-title="Cable",FAKE-H264
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10002.ts
+#EXTINF:-1 tvg-id="fake-news.fake" tvg-name="FAKE-NEWS" tvg-logo="http://127.0.0.1:15004/logo/5.1.svg" group-title="News",FAKE-NEWS
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10003.ts
+#EXTINF:-1 tvg-id="fake-hevc.fake" tvg-name="FAKE-HEVC" tvg-logo="http://127.0.0.1:15004/logo/7.1.svg" group-title="Broadcast",FAKE-HEVC
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10004.ts
+#EXTINF:-1 tvg-id="fake-sports.fake" tvg-name="FAKE-SPORTS" tvg-logo="http://127.0.0.1:15004/logo/9.1.svg" group-title="Sports",FAKE-SPORTS
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10005.ts
+#EXTINF:-1 tvg-id="fault-slowstart.fake" tvg-name="FAULT-SLOWSTART" tvg-logo="http://127.0.0.1:15004/logo/900.1.svg" group-title="Faults",FAULT-SLOWSTART
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10006.ts
+#EXTINF:-1 tvg-id="fault-stall.fake" tvg-name="FAULT-STALL" tvg-logo="http://127.0.0.1:15004/logo/900.2.svg" group-title="Faults",FAULT-STALL
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10007.ts
+#EXTINF:-1 tvg-id="fault-die.fake" tvg-name="FAULT-DIE" tvg-logo="http://127.0.0.1:15004/logo/900.3.svg" group-title="Faults",FAULT-DIE
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10008.ts
+#EXTINF:-1 tvg-id="fault-codec.fake" tvg-name="FAULT-CODEC" tvg-logo="http://127.0.0.1:15004/logo/900.4.svg" group-title="Faults",FAULT-CODEC
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10009.ts
+#EXTINF:-1 tvg-id="fault-bitrate.fake" tvg-name="FAULT-BITRATE" tvg-logo="http://127.0.0.1:15004/logo/900.5.svg" group-title="Faults",FAULT-BITRATE
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10010.ts
+#EXTINF:-1 tvg-id="fault-audio.fake" tvg-name="FAULT-AUDIO" tvg-logo="http://127.0.0.1:15004/logo/900.6.svg" group-title="Faults",FAULT-AUDIO
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10011.ts
+#EXTINF:-1 tvg-id="fault-resolution.fake" tvg-name="FAULT-RESOLUTION" tvg-logo="http://127.0.0.1:15004/logo/900.7.svg" group-title="Faults",FAULT-RESOLUTION
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10012.ts
+#EXTINF:-1 tvg-id="fault-hang.fake" tvg-name="FAULT-HANG" tvg-logo="http://127.0.0.1:15004/logo/900.8.svg" group-title="Faults",FAULT-HANG
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10013.ts
+#EXTINF:-1 tvg-id="fault-dead.fake" tvg-name="FAULT-DEAD" tvg-logo="http://127.0.0.1:15004/logo/900.9.svg" group-title="Faults",FAULT-DEAD
+http://127.0.0.1:15004/live/fakeuser/FAKEPASS-7b1e/10014.ts
+#EXTINF:-1 tvg-id="" tvg-name="Fake Movie 00000 (2026)" tvg-logo="" group-title="VOD | Broadcast",Fake Movie 00000 (2026)
+http://127.0.0.1:15004/movie/fakeuser/FAKEPASS-7b1e/500000.mp4
+#EXTINF:-1 tvg-id="" tvg-name="Fake Movie 00001 (2026)" tvg-logo="" group-title="VOD | Cable",Fake Movie 00001 (2026)
+http://127.0.0.1:15004/movie/fakeuser/FAKEPASS-7b1e/500001.mp4
+#EXTINF:-1 tvg-id="" tvg-name="Fake Movie 00002 (2026)" tvg-logo="" group-title="VOD | News",Fake Movie 00002 (2026)
+http://127.0.0.1:15004/movie/fakeuser/FAKEPASS-7b1e/500002.mp4
+#EXTINF:-1 tvg-id="" tvg-name="Fake Series 000 S01E01" tvg-logo="" group-title="SERIES | Fake",Fake Series 000 S01E01
+http://127.0.0.1:15004/series/fakeuser/FAKEPASS-7b1e/800000.mkv
+#EXTINF:-1 tvg-id="" tvg-name="Fake Series 000 S01E02" tvg-logo="" group-title="SERIES | Fake",Fake Series 000 S01E02
+http://127.0.0.1:15004/series/fakeuser/FAKEPASS-7b1e/800001.mkv

@@ -126,6 +126,35 @@ func TestHLSServiceBurnsEmbeddedASSFromExtractionCacheWithFontsDir(t *testing.T)
 	}
 }
 
+// TestHLSServiceBurnsEmbeddedSubRipFromExtractionCache covers #860: a SubRip
+// stream is extracted as SRT and burned from that file, so a start or a seek
+// does not make libass demux the whole media file.
+func TestHLSServiceBurnsEmbeddedSubRipFromExtractionCache(t *testing.T) {
+	source := burnInSource(t)
+	source.MediaStreams[2].Codec = "subrip"
+	cache := t.TempDir()
+	extractor := &fakeExtractor{content: map[string]string{".ass": burnInASS, ".srt": "1\n00:00:01,000 --> 00:00:02,000\nline\n", "4": "\x00\x01\x00\x00font"}}
+	manager := &hlsFakeManager{segment: "encoded segment"}
+	service := burnInService(source, manager, extractor, cache)
+
+	for range 2 {
+		if _, err := service.Segment(t.Context(), burnInRequest()); err != nil {
+			t.Fatalf("Segment(): %v", err)
+		}
+	}
+	if got := extractor.runCount(); got != 2 {
+		t.Fatalf("extractor runs = %d (%q), want 2", got, extractor.runs)
+	}
+	subtitleFile := filepath.Join(cache, "subtitles", "0a", "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9", "2.srt")
+	job := manager.lastRestart
+	if want := "subtitles=f='" + subtitleFile + "'"; job.EmbeddedSubtitleSource != "" || job.ExternalSubtitleSource != want {
+		t.Fatalf("subtitle sources = embedded %q external %q, want external %q", job.EmbeddedSubtitleSource, job.ExternalSubtitleSource, want)
+	}
+	if filter := hlsConstraintArgumentValue(job.Args, "-vf"); strings.Contains(filter, source.Path) || strings.Contains(filter, ":si=") {
+		t.Fatalf("-vf = %q, want no subtitle read from the media file", filter)
+	}
+}
+
 // D-61: a failed extraction does not fail the start; libass reads the media
 // file as before.
 func TestHLSServiceBurnsFromMediaFileWhenExtractionFails(t *testing.T) {

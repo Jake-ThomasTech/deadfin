@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Transcode worker image smoke (#623). Starts deploy/compose/worker-smoke.yml
+# with IMAGE, completes the startup wizard, scans a generated clip, and
+# requests the first HLS segment of an h264 transcode. The server runs in
+# workers-only mode, so the segment proves that the worker in the other
+# container encoded it. Usage: tools/worker-smoke IMAGE
+set -euo pipefail
+
+image=${1:?image required}
+root=$(cd "$(dirname "$0")/.." && pwd)
+compose=(docker compose -f "$root/deploy/compose/worker-smoke.yml" -p "deadfin-worker-smoke-$$")
+port=${DEADFIN_SMOKE_PORT:-18096}
+base="http://127.0.0.1:$port"
+auth='MediaBrowser Client="worker-smoke", Device="smoke", DeviceId="worker-smoke", Version="1"'
+token=
+
+fail() {
+  echo "worker-smoke: $*" >&2
+  "${compose[@]}" logs --no-color --tail=80 server worker >&2 || true
+  exit 1
+}
+cleanup() { "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+b64url() { openssl rand "$1" | openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+export DEADFIN_IMAGE=$image DEADFIN_SMOKE_PORT=$port
+DEADFIN_WORKER_TOKEN="dfw1.$(b64url 6).$(b64url 32)."
+export DEADFIN_WORKER_TOKEN
+
+# api METHOD PATH [BODY]: prints the body; fails on a status of 300 or more.
+api() {
+  local method=$1 path=$2 header=$auth out status data=()
+  [[ $# -ge 3 ]] && data=(--data "$3")
+  [[ -n $token ]] && header="$auth, Token=\"$token\""
+  out=$(mktemp)
+  status=$(curl -sS -o "$out" -w '%{http_code}' -X "$method" -H "Authorization: $header" \
+    -H 'Content-Type: application/json' ${data[@]+"${data[@]}"} "$base$path") || { rm -f "$out"; return 1; }
+  if (( status >= 300 )); then
+    echo "worker-smoke: $method $path answered $status: $(head -c 300 "$out")" >&2
+    rm -f "$out"
+    return 1
+  fi
+  cat "$out"
+  rm -f "$out"
+}
+
+# wait_for SECONDS DESCRIPTION COMMAND...
+wait_for() {
+  local seconds=$1 what=$2
+  shift 2
+  for _ in $(seq "$seconds"); do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  fail "$what did not happen within ${seconds}s"
+}
+
+"${compose[@]}" up --detach --quiet-pull || fail "compose up"
+wait_for 90 "server start" api GET /System/Info/Public
+
+api POST /Startup/Configuration '{"ServerName":"Worker smoke","UICulture":"en-US","MetadataCountryCode":"US","PreferredMetadataLanguage":"en"}' >/dev/null
+api POST /Startup/User '{"Name":"smoke","Password":"smoke-password"}' >/dev/null
+api POST /Startup/Complete >/dev/null
+login=$(api POST /Users/AuthenticateByName '{"Username":"smoke","Pw":"smoke-password"}')
+token=$(jq -r .AccessToken <<<"$login")
+user=$(jq -r .User.Id <<<"$login")
+
+api POST "/Library/VirtualFolders?name=Movies&collectionType=movies&paths=/media/movies&refreshLibrary=true" '{"LibraryOptions":{}}' >/dev/null
+movie() { api GET "/Users/$user/Items?Recursive=true&IncludeItemTypes=Movie" | jq -er '.Items[0].Id'; }
+wait_for 120 "library scan" movie
+item=$(movie)
+
+ready_worker() { api GET /deadfin/v1/workers/scaling | jq -e '[.pools[].workers.ready] | add >= 1'; }
+wait_for 60 "worker registration" ready_worker
+
+query="MediaSourceId=$item&DeviceId=worker-smoke&PlaySessionId=worker-smoke&VideoCodec=h264&AudioCodec=aac&VideoBitRate=2000000&AudioBitRate=128000&MaxAudioChannels=2&SegmentContainer=ts&SegmentLength=6&api_key=$token"
+main=$(api GET "/Videos/$item/main.m3u8?$query") || fail "main playlist"
+segment=$(grep -v '^#' <<<"$main" | head -n1)
+[[ -n $segment ]] || fail "main playlist has no segment: $main"
+out=$(mktemp)
+status=$(curl -sS -o "$out" -w '%{http_code}' --max-time 60 "$base/Videos/$item/$segment") || true
+size=$(wc -c <"$out" | tr -d ' ')
+head -c 1 "$out" | od -An -tx1 | grep -q 47 || { rm -f "$out"; fail "segment status $status, $size bytes, not MPEG-TS"; }
+rm -f "$out"
+(( status == 200 && size > 10000 )) || fail "segment status $status, $size bytes"
+placed=$(api GET /deadfin/v1/metrics | awk '/^deadfin_transcode_placements_total\{target="worker"/ {sum += $NF} END {print sum + 0}')
+(( placed >= 1 )) || fail "no worker placement in /deadfin/v1/metrics"
+echo "worker-smoke: ok: segment ${segment%%\?*} ($size bytes) from the worker; worker placements: $placed"

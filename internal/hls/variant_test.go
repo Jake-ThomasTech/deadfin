@@ -384,3 +384,19 @@ type variantKeyframeSource struct {
 func (s variantKeyframeSource) Keyframes(context.Context, dto.UUID, string) (keyframes.Data, bool, error) {
 	return s.data, s.found, s.err
 }
+
+func TestMainPlaylistSegmentMatchesEqualSegments(t *testing.T) {
+	request := hls.MainPlaylistRequest{SegmentLengthMilliseconds: 6000, RunTimeTicks: 130_000_000, SegmentContainer: "ts"}
+	for _, test := range []struct {
+		index         int
+		start, length int64
+	}{{0, 0, 60_000_000}, {1, 60_000_000, 60_000_000}, {2, 120_000_000, 10_000_000}} {
+		start, length, err := hls.MainPlaylistSegment(t.Context(), request, test.index)
+		if err != nil || start != test.start || length != test.length {
+			t.Fatalf("segment %d = %d, %d, %v; want %d, %d", test.index, start, length, err, test.start, test.length)
+		}
+	}
+	if _, _, err := hls.MainPlaylistSegment(t.Context(), request, 3); err == nil {
+		t.Fatal("segment past the end was accepted")
+	}
+}

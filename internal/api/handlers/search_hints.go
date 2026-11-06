@@ -264,7 +264,7 @@ func (h itemHandler) searchHintPage(ctx context.Context, values []item.Item, use
 		hint := dto.SearchHint{
 			ItemID: value.ID, ID: value.ID, Name: projected.Name,
 			IndexNumber: value.IndexNumber, ProductionYear: value.ProductionYear, ParentIndexNumber: value.ParentIndexNumber,
-			Type: dto.Kind(value.Kind.String()), RunTimeTicks: value.RunTimeTicks, MediaType: projected.MediaType,
+			Type: dto.Kind(item.ClientTypeName(value)), RunTimeTicks: value.RunTimeTicks, MediaType: projected.MediaType,
 			EndDate: value.EndDate, Artists: []string{},
 		}
 		if value.IsFolder {

@@ -1,8 +1,8 @@
 {
   "source": {
-    "deadfin_revision": "46fd154a9d1aa4ac0ad91ef3b6bb786489de7090",
+    "deadfin_revision": "d0325df5c7117a31078dff35ce9dff7ba52ec10b",
     "jellyfin_pin": "b04614e18d2aeed8d3d3de920c381c6bd5b97bdb",
-    "route_count": 337,
+    "route_count": 345,
     "openapi_version": "12.0.0"
   },
   "operations": [
@@ -22,12 +22,11 @@
       "method": "POST",
       "path": "/LiveTv/ListingProviders",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P5b admin API (#541)"
     },
     {
       "id": "AddMediaPath",
@@ -54,12 +53,11 @@
       "method": "POST",
       "path": "/LiveTv/TunerHosts",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P5b admin API (#541)"
     },
     {
       "id": "AddUserToSession",
@@ -212,8 +210,7 @@
       "shadow": false,
       "clients": [
         "swiftfin"
-      ],
-      "reason": "deferred: API key management not implemented"
+      ]
     },
     {
       "id": "CreatePlaylist",
@@ -290,14 +287,12 @@
       "method": "DELETE",
       "path": "/Devices",
       "subsystem": "Device",
-      "status": "deferred",
-      "disposition": "deferred",
-      "registered": false,
+      "status": "partial",
+      "registered": true,
       "shadow": false,
       "clients": [
         "swiftfin"
-      ],
-      "reason": "deferred: device management not implemented"
+      ]
     },
     {
       "id": "DeleteItem",
@@ -354,12 +349,11 @@
       "method": "DELETE",
       "path": "/LiveTv/ListingProviders",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P5b admin API (#541)"
     },
     {
       "id": "DeleteLyrics",
@@ -403,12 +397,11 @@
       "method": "DELETE",
       "path": "/LiveTv/TunerHosts",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P5b admin API (#541)"
     },
     {
       "id": "DeleteUser",
@@ -765,12 +758,11 @@
       "method": "GET",
       "path": "/LiveTv/Channels/{channelId}",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P6 read API (#541)"
     },
     {
       "id": "GetChannelFeatures",
@@ -801,12 +793,11 @@
       "method": "GET",
       "path": "/LiveTv/ChannelMappingOptions",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P5b admin API (#541)"
     },
     {
       "id": "GetChannels",
@@ -901,12 +892,11 @@
       "method": "GET",
       "path": "/LiveTv/ListingProviders/Default",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P5b admin API (#541)"
     },
     {
       "id": "GetDefaultMetadataOptions",
@@ -937,38 +927,32 @@
       "method": "GET",
       "path": "/Devices/Info",
       "subsystem": "Device",
-      "status": "deferred",
-      "disposition": "deferred",
-      "registered": false,
+      "status": "partial",
+      "registered": true,
       "shadow": false,
-      "clients": [],
-      "reason": "deferred: device management not implemented"
+      "clients": []
     },
     {
       "id": "GetDeviceOptions",
       "method": "GET",
       "path": "/Devices/Options",
       "subsystem": "Device",
-      "status": "deferred",
-      "disposition": "deferred",
-      "registered": false,
+      "status": "partial",
+      "registered": true,
       "shadow": false,
-      "clients": [],
-      "reason": "deferred: device management not implemented"
+      "clients": []
     },
     {
       "id": "GetDevices",
       "method": "GET",
       "path": "/Devices",
       "subsystem": "Device",
-      "status": "deferred",
-      "disposition": "deferred",
-      "registered": false,
+      "status": "partial",
+      "registered": true,
       "shadow": false,
       "clients": [
         "swiftfin"
-      ],
-      "reason": "deferred: device management not implemented"
+      ]
     },
     {
       "id": "GetDirectoryContents",
@@ -1160,12 +1144,11 @@
       "method": "GET",
       "path": "/LiveTv/GuideInfo",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P5b admin API (#541)"
     },
     {
       "id": "GetInstantMixFromAlbum",
@@ -1383,8 +1366,7 @@
       "shadow": false,
       "clients": [
         "swiftfin"
-      ],
-      "reason": "deferred: API key management not implemented"
+      ]
     },
     {
       "id": "GetLatestChannelItems",
@@ -1425,12 +1407,11 @@
       "method": "GET",
       "path": "/LiveTv/ListingProviders/Lineups",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P5b admin API (#541)"
     },
     {
       "id": "GetLiveRecordingFile",
@@ -1461,38 +1442,35 @@
       "method": "GET",
       "path": "/LiveTv/Channels",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P6 read API (#541)"
     },
     {
       "id": "GetLiveTvInfo",
       "method": "GET",
       "path": "/LiveTv/Info",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P6 read API (#541)"
     },
     {
       "id": "GetLiveTvPrograms",
       "method": "GET",
       "path": "/LiveTv/Programs",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [
         "swiftfin"
       ],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P6 read API (#541)"
     },
     {
       "id": "GetLocalTrailers",
@@ -1533,14 +1511,12 @@
       "method": "GET",
       "path": "/System/Logs/Log",
       "subsystem": "System",
-      "status": "deferred",
-      "disposition": "deferred",
-      "registered": false,
+      "status": "partial",
+      "registered": true,
       "shadow": false,
       "clients": [
         "swiftfin"
-      ],
-      "reason": "deferred: server log access not implemented"
+      ]
     },
     {
       "id": "GetLyrics",
@@ -1930,24 +1906,22 @@
       "method": "GET",
       "path": "/LiveTv/Programs/{programId}",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P6 read API (#541)"
     },
     {
       "id": "GetPrograms",
       "method": "POST",
       "path": "/LiveTv/Programs",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P6 read API (#541)"
     },
     {
       "id": "GetPublicSystemInfo",
@@ -2022,14 +1996,13 @@
       "method": "GET",
       "path": "/LiveTv/Programs/Recommended",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [
         "swiftfin"
       ],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P6 read API (#541)"
     },
     {
       "id": "GetRecording",
@@ -2226,14 +2199,12 @@
       "method": "GET",
       "path": "/System/Logs",
       "subsystem": "System",
-      "status": "deferred",
-      "disposition": "deferred",
-      "registered": false,
+      "status": "partial",
+      "registered": true,
       "shadow": false,
       "clients": [
         "swiftfin"
-      ],
-      "reason": "deferred: server log access not implemented"
+      ]
     },
     {
       "id": "GetSessions",
@@ -2581,12 +2552,11 @@
       "method": "GET",
       "path": "/LiveTv/TunerHosts/Types",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P5b admin API (#541)"
     },
     {
       "id": "GetUniversalAudioStream",
@@ -3350,8 +3320,7 @@
       "shadow": false,
       "clients": [
         "swiftfin"
-      ],
-      "reason": "deferred: API key management not implemented"
+      ]
     },
     {
       "id": "SHADOW:AuthenticateUser",
@@ -4134,12 +4103,11 @@
       "method": "POST",
       "path": "/LiveTv/ChannelMappings",
       "subsystem": "LiveTv",
-      "status": "stubbed",
-      "disposition": "deferred",
+      "status": "partial",
       "registered": true,
       "shadow": false,
       "clients": [],
-      "reason": "intentional stub per D2"
+      "reason": "Live TV P5b admin API (#541)"
     },
     {
       "id": "SetItemImage",
@@ -4556,14 +4524,12 @@
       "method": "POST",
       "path": "/Devices/Options",
       "subsystem": "Device",
-      "status": "deferred",
-      "disposition": "deferred",
-      "registered": false,
+      "status": "partial",
+      "registered": true,
       "shadow": false,
       "clients": [
         "swiftfin"
-      ],
-      "reason": "deferred: device management not implemented"
+      ]
     },
     {
       "id": "UpdateDisplayPreferences",

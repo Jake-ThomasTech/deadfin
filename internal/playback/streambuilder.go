@@ -524,6 +524,21 @@ func (b *StreamBuilder) setDirectPlayOptions(options *MediaOptions, source *Medi
 	}
 }
 
+// hasTSTranscodingProfile reports a video transcoding profile with the ts
+// container for the context. A source with UseMostCompatibleTranscodingProfile
+// uses only those profiles; when the client sends none, it uses the client's
+// other profiles (D-89). Upstream then has no profile and falls back to a
+// progressive stream; Deadfin serves no progressive stream for a live source.
+func hasTSTranscodingProfile(profile *DeviceProfile, context EncodingContext) bool {
+	for index := range profile.TranscodingProfiles {
+		candidate := &profile.TranscodingProfiles[index]
+		if candidate.Type == DlnaVideo && candidate.Context == context && strings.EqualFold(candidate.Container, "ts") {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *StreamBuilder) videoTranscodeProfile(options *MediaOptions, source *MediaSourceInfo, video, audio *MediaStream) (*TranscodingProfile, *PlayMethod, error) {
 	defaultSupports := !source.SupportsTranscoding && !source.SupportsDirectStream && !source.SupportsDirectPlay
 	if !source.SupportsTranscoding && !source.SupportsDirectStream && !defaultSupports {
@@ -531,9 +546,10 @@ func (b *StreamBuilder) videoTranscodeProfile(options *MediaOptions, source *Med
 	}
 	bestVideo, bestAudio := 4, 4
 	var best *TranscodingProfile
+	mostCompatible := source.UseMostCompatibleTranscodingProfile && hasTSTranscodingProfile(options.Profile, options.Context)
 	for index := range options.Profile.TranscodingProfiles {
 		profile := &options.Profile.TranscodingProfiles[index]
-		if profile.Type != DlnaVideo || profile.Context != options.Context || (source.UseMostCompatibleTranscodingProfile && !strings.EqualFold(profile.Container, "ts")) {
+		if profile.Type != DlnaVideo || profile.Context != options.Context || (mostCompatible && !strings.EqualFold(profile.Container, "ts")) {
 			continue
 		}
 		videoRank := 3

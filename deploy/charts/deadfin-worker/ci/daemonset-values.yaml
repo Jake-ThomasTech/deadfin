@@ -1,0 +1,25 @@
+# helm lint and helm template input: the fixed-fleet shape.
+server:
+  url: https://deadfin.example
+token:
+  value: dfw1.example
+mode: daemonset
+worker:
+  maxJobs: 3
+  hwType: qsv
+  hwDecode: [hevc, av1]
+  pathMaps: [/srv/media=/media]
+gpu:
+  supplementalGroups: [44, 105]
+media:
+  enabled: true
+  volume:
+    nfs: { server: nas.example, path: /srv/media }
+daemonset:
+  pools: [qsv]
+nodeSelector:
+  intel.feature.node.kubernetes.io/gpu: "true"
+prePull:
+  enabled: true
+  nodeSelector:
+    intel.feature.node.kubernetes.io/gpu: "true"

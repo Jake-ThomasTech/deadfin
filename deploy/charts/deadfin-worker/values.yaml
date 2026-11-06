@@ -1,0 +1,134 @@
+# Deadfin transcode workers. docs/transcode-workers.md is the install guide.
+
+image:
+  repository: ghcr.io/deadfin-org/deadfin
+  # Empty uses the chart appVersion. Use the server's version: a worker whose
+  # ffmpeg major version differs from the server's is refused.
+  tag: ""
+  # Optional sha256:... digest; it wins over the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+server:
+  # Base URL of the Deadfin server, including any base path. Required.
+  url: ""
+  # Plain http to a non-loopback server. The server must allow it too
+  # (DEADFIN_TRANSCODE_WORKERS_ALLOW_HTTP).
+  insecure: false
+
+# The worker token: a static token (from DEADFIN_TRANSCODE_WORKER_TOKENS on
+# the server) or a multi-use dashboard join token. Give existingSecret, or value to create a Secret.
+token:
+  existingSecret: ""
+  key: token
+  value: ""
+
+# daemonset: one worker per selected node, with a durable identity in a
+# hostPath state directory. deployment: one Deployment per entry of pools,
+# with ephemeral identities, optionally scaled by KEDA.
+mode: daemonset
+
+# Worker settings. A pool entry in deployment mode can override each one.
+worker:
+  # Concurrent job limit; set it to the hardware session limit.
+  maxJobs: 1
+  # qsv, vaapi or nvenc; empty is software.
+  hwType: ""
+  renderNode: /dev/dri/renderD128
+  # Codecs to decode in hardware; empty uses the server's setting.
+  hwDecode: []
+  # Jobs that use the hardware family; 0 is maxJobs.
+  hwSessions: 0
+  # shared (read mapped media), stream (fetch from the server) or auto.
+  inputMode: auto
+  # Server media prefix to local mount, as /server=/local.
+  pathMaps: []
+  drainGrace: 25s
+  maxHeldSegments: 64
+  extraArgs: []
+  env: []
+  resources: {}
+
+# Grace for a drain: the server hands off each job, then the worker stops.
+# Keep it above worker.drainGrace.
+terminationGracePeriodSeconds: 30
+
+# Optional read-only media volume for inputMode shared or auto.
+media:
+  enabled: false
+  mountPath: /media
+  # A volume source, for example {nfs: {server: nas, path: /media}} or
+  # {persistentVolumeClaim: {claimName: media}}.
+  volume: {}
+
+# Hardware devices. For qsv and vaapi without a device plugin, the chart
+# mounts hostPath /dev/dri. With a device plugin, request it in
+# worker.resources (gpu.intel.com/i915, nvidia.com/gpu) and set
+# mountDri to false.
+gpu:
+  mountDri: true
+  # For example nvidia, when the NVIDIA container runtime is a RuntimeClass.
+  runtimeClassName: ""
+  # Supplemental groups that may open the render node (render, video).
+  supplementalGroups: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsUser: 65532
+  runAsGroup: 65532
+  runAsNonRoot: true
+  fsGroup: 65532
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+daemonset:
+  # Pool labels each worker proposes at enrollment.
+  pools: []
+  # Durable worker identity, one per node.
+  stateHostPath: /var/lib/deadfin-worker
+
+# deployment mode: one Deployment per pool. Each entry may set replicas,
+# worker overrides (maxJobs, hwType, renderNode, hwDecode, hwSessions,
+# inputMode, resources), nodeSelector, tolerations, affinity and keda.
+pools:
+  - name: default
+    replicas: 1
+
+keda:
+  # A ScaledObject per pool. Needs KEDA in the cluster.
+  enabled: false
+  # Warm floor: 0 scales to zero and relies on the queue and the fallback
+  # chain.
+  minReplicaCount: 1
+  maxReplicaCount: 4
+  pollingInterval: 5
+  cooldownPeriod: 600
+  scaleDownStabilizationSeconds: 600
+  # metrics-api reads /deadfin/v1/workers/scaling with a scaling token;
+  # prometheus queries deadfin_transcode_pool_slots_wanted.
+  trigger: metrics-api
+  metricsApi:
+    # Empty is server.url + /deadfin/v1/workers/scaling.
+    url: ""
+    # Secret with the scaling token (dashboard or
+    # DEADFIN_TRANSCODE_SCALING_TOKENS).
+    tokenSecret: ""
+    tokenKey: token
+  prometheus:
+    serverAddress: ""
+
+# A DaemonSet that keeps the worker image on the selected nodes, so a
+# scale-up does not wait for an image pull.
+prePull:
+  enabled: false
+  nodeSelector: {}
+  tolerations: []

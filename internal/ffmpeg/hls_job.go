@@ -75,6 +75,27 @@ type HLSRequest struct {
 	ExternalSubtitleSource   string
 	ExternalSubtitleRevision string
 	OpenExternalSubtitle     func() (*sourcefile.Source, error)
+	// SubtitleFontsDir is the fontsdir option of the subtitle burn-in. A
+	// transcode worker receives its fonts as job assets (#624).
+	SubtitleFontsDir string
+	// Local keeps the family on this host. A Live TV input reads the
+	// server's loopback stream broker, which a transcode worker cannot reach.
+	Local bool
+	// RemoteOnly marks a family whose output codec only a transcode worker
+	// encodes (#854). Args is built for that worker, so the family never
+	// runs on this host: without a remote start, the start fails.
+	RemoteOnly bool
+	// Facts feed transcode-worker placement (#616).
+	Facts JobFacts
+	// BuildArgs rebuilds Args for a transcode worker's capabilities and
+	// hardware (#622). Nil sends Args unchanged.
+	BuildArgs ArgsBuilder
+	// Handoff restarts the family at a segment index through the caller's
+	// segment path. The manager calls it when a remote host is lost or
+	// drains, at the first segment the host did not complete, so the
+	// replacement starts before a client asks for that segment (#617). Nil
+	// leaves the restart to the next segment request.
+	Handoff func(ctx context.Context, index int) error
 	// TranscodingInfo is the session projection of this rendition. The
 	// manager reports it for DeviceID while the job runs, as upstream
 	// TranscodeManager.ReportTranscodingProgress does. Nil reports nothing.
@@ -100,6 +121,9 @@ type hlsJob struct {
 
 	playSessionID            string
 	deviceID                 string
+	facts                    JobFacts
+	buildArgs                ArgsBuilder
+	handoff                  func(context.Context, int) error
 	segmentLength            int
 	maxForwardGap            int
 	segmentStarts            []int64
@@ -112,8 +136,14 @@ type hlsJob struct {
 	externalSubtitleSource   string
 	externalSubtitleRevision string
 	openExternalSubtitle     func() (*sourcefile.Source, error)
+	fontsDir                 string
+	local                    bool
+	remoteOnly               bool
 	transcodingInfo          *dto.TranscodingInfo
 	retain                   bool
+	// adopted marks a remote family that a new server process adopted
+	// (#618) and that no request joined yet: it has no rendition identity.
+	adopted bool
 }
 
 var hlsIndexDirective = regexp.MustCompile(`%(?:[-+# 0]*[0-9]*(?:\.[0-9]+)?)d`)
@@ -163,35 +193,11 @@ func (manager *TranscodeManager) validateHLSRequest(request HLSRequest) (*hlsJob
 		return nil, nil, errors.New("HLS external subtitle authority has no filter source")
 	}
 
-	playlist, err := manager.normalizeOutputPath(request.PlaylistPath)
+	family, err := manager.hlsFamily(request.PlaylistPath, request.SegmentPattern)
 	if err != nil {
 		return nil, nil, err
 	}
-	pattern, err := manager.normalizeOutputPath(request.SegmentPattern)
-	if err != nil {
-		return nil, nil, err
-	}
-	matches := hlsIndexDirective.FindAllStringIndex(pattern, -1)
-	if len(matches) != 1 {
-		return nil, nil, errors.New("HLS segment pattern must contain exactly one integer index directive")
-	}
-	remaining := pattern[:matches[0][0]] + pattern[matches[0][1]:]
-	if strings.Contains(strings.ReplaceAll(remaining, "%%", ""), "%") {
-		return nil, nil, errors.New("HLS segment pattern contains an unsupported format directive")
-	}
-	for _, index := range []int{-1, 0} {
-		formatted, formatErr := formatHLSSegment(pattern, index)
-		if formatErr != nil {
-			return nil, nil, formatErr
-		}
-		if _, normalizeErr := manager.normalizeOutputPath(formatted); normalizeErr != nil {
-			return nil, nil, normalizeErr
-		}
-	}
-	prefix, suffix := filepath.Base(pattern[:matches[0][0]]), pattern[matches[0][1]:]
-	if directory := filepath.Dir(pattern); directory != filepath.Dir(fmt.Sprintf(pattern, 0)) {
-		return nil, nil, errors.New("HLS segment index directive must be in the filename")
-	}
+	playlist, pattern := family.playlist, family.pattern
 	args := append([]string(nil), request.Args...)
 	if err := manager.validateHLSOutputOperands(args, playlist, pattern); err != nil {
 		return nil, nil, err
@@ -209,17 +215,20 @@ func (manager *TranscodeManager) validateHLSRequest(request HLSRequest) (*hlsJob
 	if request.ExternalSubtitleSource != "" && countEmbeddedSubtitleOperand(args, request.ExternalSubtitleSource) != 1 {
 		return nil, nil, errors.New("HLS argv must contain exactly one external subtitle source operand")
 	}
-	return &hlsJob{
-		playlist:                 playlist,
-		pattern:                  pattern,
-		prefix:                   prefix,
-		suffix:                   suffix,
+	spec := &hlsJob{
+		playlist:                 family.playlist,
+		pattern:                  family.pattern,
+		prefix:                   family.prefix,
+		suffix:                   family.suffix,
 		live:                     request.Live,
 		minSegments:              request.MinSegments,
-		matcher:                  regexp.MustCompile("^" + regexp.QuoteMeta(prefix) + `(-?[0-9]+)` + regexp.QuoteMeta(suffix) + "$"),
+		matcher:                  family.matcher,
 		identity:                 identity,
 		playSessionID:            request.PlaySessionID,
 		deviceID:                 request.DeviceID,
+		facts:                    request.Facts,
+		buildArgs:                request.BuildArgs,
+		handoff:                  request.Handoff,
 		runTimeTicks:             request.RunTimeTicks,
 		startTimeTicks:           request.StartTimeTicks,
 		mediaSourceID:            request.MediaSourceID,
@@ -232,8 +241,53 @@ func (manager *TranscodeManager) validateHLSRequest(request HLSRequest) (*hlsJob
 		externalSubtitleSource:   request.ExternalSubtitleSource,
 		externalSubtitleRevision: request.ExternalSubtitleRevision,
 		openExternalSubtitle:     request.OpenExternalSubtitle,
+		fontsDir:                 request.SubtitleFontsDir,
+		local:                    request.Local,
+		remoteOnly:               request.RemoteOnly,
 		transcodingInfo:          request.TranscodingInfo,
-	}, args, nil
+	}
+	return spec, args, nil
+}
+
+// hlsFamily validates the output paths of a playlist family and returns a
+// job with only the family fields set.
+func (manager *TranscodeManager) hlsFamily(playlistPath, segmentPattern string) (*hlsJob, error) {
+	playlist, err := manager.normalizeOutputPath(playlistPath)
+	if err != nil {
+		return nil, err
+	}
+	pattern, err := manager.normalizeOutputPath(segmentPattern)
+	if err != nil {
+		return nil, err
+	}
+	matches := hlsIndexDirective.FindAllStringIndex(pattern, -1)
+	if len(matches) != 1 {
+		return nil, errors.New("HLS segment pattern must contain exactly one integer index directive")
+	}
+	remaining := pattern[:matches[0][0]] + pattern[matches[0][1]:]
+	if strings.Contains(strings.ReplaceAll(remaining, "%%", ""), "%") {
+		return nil, errors.New("HLS segment pattern contains an unsupported format directive")
+	}
+	for _, index := range []int{-1, 0} {
+		formatted, formatErr := formatHLSSegment(pattern, index)
+		if formatErr != nil {
+			return nil, formatErr
+		}
+		if _, normalizeErr := manager.normalizeOutputPath(formatted); normalizeErr != nil {
+			return nil, normalizeErr
+		}
+	}
+	prefix, suffix := filepath.Base(pattern[:matches[0][0]]), pattern[matches[0][1]:]
+	if directory := filepath.Dir(pattern); directory != filepath.Dir(fmt.Sprintf(pattern, 0)) {
+		return nil, errors.New("HLS segment index directive must be in the filename")
+	}
+	return &hlsJob{
+		playlist: playlist,
+		pattern:  pattern,
+		prefix:   prefix,
+		suffix:   suffix,
+		matcher:  regexp.MustCompile("^" + regexp.QuoteMeta(prefix) + `(-?[0-9]+)` + regexp.QuoteMeta(suffix) + "$"),
+	}, nil
 }
 
 func countEmbeddedSubtitleOperand(args []string, token string) int {
@@ -251,6 +305,10 @@ func countEmbeddedSubtitleOperand(args []string, token string) int {
 // sequential segment request carries its own seek and start number, and must
 // not relaunch a job that already produces it.
 func hlsJobConflicts(job *transcodeJob, spec *hlsJob) bool {
+	if job.hls != nil && job.hls.adopted {
+		// An adopted family takes the rendition of its first request.
+		return job.hls.pattern != spec.pattern
+	}
 	return job.hls == nil || !reflect.DeepEqual(job.hls.identity, spec.identity) ||
 		job.hls.sourceRevision != spec.sourceRevision ||
 		job.hls.subtitleSource != spec.subtitleSource ||
@@ -348,6 +406,9 @@ func (manager *TranscodeManager) startHLS(ctx context.Context, request HLSReques
 			manager.mu.Unlock()
 			return fmt.Errorf("conflicting ffmpeg argv or source authority for %q", spec.playlist)
 		}
+		if exists {
+			claimAdoptedLocked(job, spec)
+		}
 		if exists && (job.cleanupPending || job.reapPending || job.state == transcodeTerminating) {
 			waitDone := job.waitDone
 			manager.mu.Unlock()
@@ -383,6 +444,7 @@ func (manager *TranscodeManager) startHLS(ctx context.Context, request HLSReques
 			continue
 		}
 		if leader {
+			startCtx, startCancel := context.WithCancel(context.Background())
 			job = &transcodeJob{
 				manager:     manager,
 				output:      spec.playlist,
@@ -392,6 +454,8 @@ func (manager *TranscodeManager) startHLS(ctx context.Context, request HLSReques
 				state:       transcodeStarting,
 				idleTimeout: hlsIdleTimeout,
 				hls:         spec,
+				startCtx:    startCtx,
+				startCancel: startCancel,
 			}
 			manager.jobs[spec.playlist] = job
 			manager.registerHLSSessionLocked(job)
@@ -400,14 +464,17 @@ func (manager *TranscodeManager) startHLS(ctx context.Context, request HLSReques
 		if !leader {
 			manager.resetHLSIdleLocked(job)
 		}
+		job.startWaiters++
 		manager.mu.Unlock()
 		if leader {
 			go manager.start(job)
 		}
 		select {
 		case <-ctx.Done():
+			manager.leaveStart(job)
 			return ctx.Err()
 		case <-job.startDone:
+			manager.leaveStart(job)
 		}
 		if startupErr := job.startError(); startupErr != nil {
 			return startupErr
@@ -640,9 +707,15 @@ rebind:
 					return newHLSSegmentReader(job, file, index, timing), nil
 				}
 				state, waitErr := job.result()
+				manager.mu.Lock()
+				lost := job.runnerLost
+				manager.mu.Unlock()
 				manager.release(job)
 				if state == transcodeExited && waitErr != nil {
 					return nil, job.failureError(waitErr)
+				}
+				if lost {
+					return nil, errRemoteSegmentLost(playlist, index)
 				}
 				return nil, ErrTranscodeExited
 			}
@@ -967,6 +1040,9 @@ func (manager *TranscodeManager) RestartHLSAt(ctx context.Context, request HLSRe
 	manager.mu.Lock()
 	job := manager.jobs[spec.playlist]
 	waitForRequestedProgress := job != nil && hlsJobConflicts(job, spec)
+	if job != nil && !waitForRequestedProgress {
+		claimAdoptedLocked(job, spec)
+	}
 	manager.mu.Unlock()
 	if job != nil {
 		state, waitErr := job.result()

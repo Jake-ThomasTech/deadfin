@@ -1,0 +1,71 @@
+{{- if eq .Values.mode "deployment" }}
+{{- $root := . }}
+{{- range $pool := .Values.pools }}
+{{- $keda := mergeOverwrite (deepCopy $root.Values.keda) ($pool.keda | default dict) }}
+{{- if $keda.enabled }}
+{{- $name := printf "%s-%s" (include "deadfin-worker.fullname" $root) $pool.name | trunc 63 | trimSuffix "-" }}
+{{- $maxJobs := $pool.maxJobs | default $root.Values.worker.maxJobs }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "deadfin-worker.labels" $root | nindent 4 }}
+    deadfin.org/pool: {{ $pool.name | quote }}
+spec:
+  scaleTargetRef:
+    name: {{ $name }}
+  minReplicaCount: {{ $keda.minReplicaCount }}
+  maxReplicaCount: {{ $keda.maxReplicaCount }}
+  pollingInterval: {{ $keda.pollingInterval }}
+  cooldownPeriod: {{ $keda.cooldownPeriod }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+        scaleDown:
+          stabilizationWindowSeconds: {{ $keda.scaleDownStabilizationSeconds }}
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 300
+  triggers:
+    {{- if eq $keda.trigger "metrics-api" }}
+    - type: metrics-api
+      metricType: AverageValue
+      metadata:
+        url: {{ $keda.metricsApi.url | default (printf "%s/deadfin/v1/workers/scaling" (trimSuffix "/" $root.Values.server.url)) | quote }}
+        valueLocation: {{ printf "pools.%s.slotsWanted" $pool.name | quote }}
+        targetValue: {{ $maxJobs | quote }}
+        authMode: bearer
+      authenticationRef:
+        name: {{ $name }}
+    {{- else if eq $keda.trigger "prometheus" }}
+    - type: prometheus
+      metricType: AverageValue
+      metadata:
+        serverAddress: {{ required "keda.prometheus.serverAddress is required" $keda.prometheus.serverAddress | quote }}
+        query: {{ printf "sum(deadfin_transcode_pool_slots_wanted{pool=%q})" $pool.name | quote }}
+        threshold: {{ $maxJobs | quote }}
+    {{- else }}
+    {{- fail "keda.trigger must be metrics-api or prometheus" }}
+    {{- end }}
+{{- if eq $keda.trigger "metrics-api" }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "deadfin-worker.labels" $root | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: token
+      name: {{ required "keda.metricsApi.tokenSecret is required for the metrics-api trigger" $keda.metricsApi.tokenSecret }}
+      key: {{ $keda.metricsApi.tokenKey }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

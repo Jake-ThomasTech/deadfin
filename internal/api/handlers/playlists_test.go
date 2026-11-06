@@ -464,6 +464,29 @@ func TestPlaylistRemoveWithAPIKey(t *testing.T) {
 	sameIDs(t, "after API-key remove", f.entries(id, f.owner.String()), ids(b))
 }
 
+// TestPlaylistItemsWithAPIKeyUserID proves GetPlaylistItems honors the userId
+// query for an API key, as upstream does (userId ?? User.GetUserId()).
+func TestPlaylistItemsWithAPIKeyUserID(t *testing.T) {
+	f := newPlaylistFixture(t)
+	a, b := f.movies[0], f.movies[1]
+	id := f.create(f.owner.String(), `{"Name":"Keyed","Ids":["`+a.ID.String()+`","`+b.ID.String()+`"]}`)
+	base := "/Playlists/" + id.String() + "/Items"
+	f.expect(f.do(http.MethodGet, base, "apikey", ""), http.StatusNotFound)
+	record := f.do(http.MethodGet, base+"?userId="+f.owner.String(), "apikey", "")
+	f.expect(record, http.StatusOK)
+	var page struct {
+		Items            []struct{ Id string }
+		TotalRecordCount int
+	}
+	if err := json.Unmarshal(record.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode items: %v", err)
+	}
+	if page.TotalRecordCount != 2 || len(page.Items) != 2 || page.Items[0].Id != a.ID.String() || page.Items[1].Id != b.ID.String() {
+		t.Fatalf("items page = %+v", page)
+	}
+	f.expect(f.do(http.MethodGet, base+"?userId=not-a-guid", "apikey", ""), http.StatusBadRequest)
+}
+
 // TestPlaylistImport proves an imported Jellyfin playlist keeps its owner,
 // shares, open access, and entry order, and that a rerun keeps it.
 func TestPlaylistImport(t *testing.T) {

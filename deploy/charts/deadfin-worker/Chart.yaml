@@ -1,0 +1,10 @@
+apiVersion: v2
+name: deadfin-worker
+description: Deadfin transcode workers (deadfin worker) as a DaemonSet or as Deployments scaled by KEDA.
+type: application
+version: 0.1.0
+# appVersion is the Deadfin image tag when image.tag is empty.
+appVersion: "0.4.0"
+home: https://deadfin.org
+sources:
+  - https://github.com/deadfin-org/deadfin

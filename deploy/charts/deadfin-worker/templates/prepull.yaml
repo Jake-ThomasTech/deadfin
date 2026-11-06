@@ -1,0 +1,52 @@
+{{- if .Values.prePull.enabled }}
+{{- $selector := dict "app.kubernetes.io/name" (include "deadfin-worker.name" .) "app.kubernetes.io/instance" .Release.Name "app.kubernetes.io/component" "prepull" }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "deadfin-worker.fullname" . }}-prepull
+  labels:
+    {{- include "deadfin-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prepull
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml $selector | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- toYaml $selector | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.prePull.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.prePull.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # The init container pulls the worker image and exits at once; the
+      # pause container keeps the pod, and with it the image, on the node.
+      initContainers:
+        - name: pull
+          image: {{ include "deadfin-worker.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [version]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            requests: { cpu: 1m, memory: 8Mi }
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            requests: { cpu: 1m, memory: 4Mi }
+            limits: { memory: 16Mi }
+{{- end }}

@@ -501,12 +501,15 @@ func applyUser(query *store.ItemQuery, user *store.User) {
 
 // supportsAddingToPlaylist ports BaseItem.SupportsAddingToPlaylist after
 // expansion: Video and Audio subtypes (Video.cs:150, Audio.cs:49), and the
-// Series, Season, and music containers that expansion replaces.
+// Series, Season, and music containers that expansion replaces. A Live TV
+// channel is accepted too, so a playlist can hold a curated channel list;
+// pinned LiveTvChannel keeps the BaseItem default false (D-94).
 func supportsAddingToPlaylist(value item.Item) bool {
 	switch value.Kind {
 	case item.KindMovie, item.KindEpisode, item.KindVideo, item.KindMusicVideo, item.KindTrailer,
 		item.KindAudio, item.KindAudioBook,
-		item.KindSeries, item.KindSeason, item.KindMusicAlbum, item.KindMusicArtist, item.KindMusicGenre:
+		item.KindSeries, item.KindSeason, item.KindMusicAlbum, item.KindMusicArtist, item.KindMusicGenre,
+		item.KindLiveTvChannel:
 		return true
 	default:
 		return false

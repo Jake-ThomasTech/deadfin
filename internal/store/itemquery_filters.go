@@ -4,6 +4,7 @@ package store
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -99,18 +100,10 @@ func translateItemQueryFilters(query ItemQuery, d Dialect) (string, []any, error
 		b.clauses = append(b.clauses, "top_parent_id IN ("+b.uuidList(query.TopParentIDs)+")")
 	}
 	if len(query.IncludeItemTypes) != 0 {
-		values := make([]string, len(query.IncludeItemTypes))
-		for i, kind := range query.IncludeItemTypes {
-			values[i] = kind.String()
-		}
-		b.clauses = append(b.clauses, "kind IN ("+b.stringList(values)+")")
+		b.clauses = append(b.clauses, "kind IN ("+b.stringList(storedKindNames(query.IncludeItemTypes))+")")
 	}
 	if len(query.IncludeItemTypes) == 0 && len(query.ExcludeItemTypes) != 0 {
-		values := make([]string, len(query.ExcludeItemTypes))
-		for i, kind := range query.ExcludeItemTypes {
-			values[i] = kind.String()
-		}
-		b.clauses = append(b.clauses, "kind NOT IN ("+b.stringList(values)+")")
+		b.clauses = append(b.clauses, "kind NOT IN ("+b.stringList(storedKindNames(query.ExcludeItemTypes))+")")
 	}
 	if len(query.MediaTypes) != 0 {
 		values := make([]string, len(query.MediaTypes))
@@ -331,11 +324,36 @@ func (b *itemQueryFilterBuilder) addUserDataPredicate(include bool, predicate fu
 // "Shingeki", or "進撃" finds the same series. Titles match on clean_title
 // like clean_name does, and on fold_title, the kana and romaji folding of
 // anime.FoldTitle. Items without anime titles never match this branch.
+//
+// The subquery is uncorrelated: it matches the anime titles once and reaches
+// their items through ix_provider_ids_provider_value_item. A correlated
+// EXISTS probed provider_ids and anime_titles for every item the name did
+// not match, which made an unfiltered search (GET /Search/Hints) read every
+// provider id of the library (deadfin#826).
 func (b *itemQueryFilterBuilder) animeTitleSearch(term, cleanPattern string) string {
 	d := b.d
 	conditions := d.SearchClause("anime_title.clean_title", b.argument(cleanPattern))
 	if folded := anime.FoldTitle(term); folded != "" {
 		conditions += " OR " + d.SearchClause("anime_title.fold_title", b.argument("%"+folded+"%"))
 	}
-	return "EXISTS (SELECT 1 FROM provider_ids AS anime_provider JOIN anime_titles AS anime_title ON anime_title.provider = anime_provider.provider AND anime_title.external_id = anime_provider.value WHERE anime_provider.item_id = items.id AND (" + conditions + "))"
+	return "items.id IN (SELECT anime_provider.item_id FROM anime_titles AS anime_title JOIN provider_ids AS anime_provider ON anime_provider.provider = anime_title.provider AND anime_provider.value = anime_title.external_id WHERE " + conditions + ")"
+}
+
+// storedKindNames ports ItemTypeLookup.BaseItemKindNames
+// (ItemTypeLookup.cs:42-58): the client kinds TvChannel and TvProgram name
+// the stored LiveTvChannel and LiveTvProgram rows.
+func storedKindNames(kinds []item.Kind) []string {
+	values := make([]string, 0, len(kinds))
+	for _, kind := range kinds {
+		switch kind {
+		case item.KindTvChannel:
+			kind = item.KindLiveTvChannel
+		case item.KindTvProgram:
+			kind = item.KindLiveTvProgram
+		}
+		if name := kind.String(); !slices.Contains(values, name) {
+			values = append(values, name)
+		}
+	}
+	return values
 }

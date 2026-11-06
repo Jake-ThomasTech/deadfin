@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/deadfin-org/deadfin/internal/item"
+	"github.com/deadfin-org/deadfin/internal/library"
 	"github.com/deadfin-org/deadfin/internal/providers"
 	"github.com/deadfin-org/deadfin/internal/providers/audiodb"
 	"github.com/deadfin-org/deadfin/internal/providers/remote"
@@ -104,5 +105,41 @@ func TestImageListerKeylessIsInert(t *testing.T) {
 	})
 	if err != nil || images != nil {
 		t.Fatalf("keyless album images = %#v, %v; want none", images, err)
+	}
+}
+
+// TestRefreshFillsAlbumPrimaryFromImageFetcher covers deadfin#847: a full
+// image refresh of an album without a cover takes the TheAudioDB album
+// thumb when the library's ImageFetchers enable TheAudioDB, although its
+// MetadataFetchers do not. The album Disc image has limit 0 by default and
+// is not set.
+func TestRefreshFillsAlbumPrimaryFromImageFetcher(t *testing.T) {
+	cassette, err := remotetest.Load(filepath.Join("testdata", "supplemental-metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := audiodb.DefaultConfig()
+	config.APIKey = "test-key"
+	provider := audiodb.NewProvider(audiodb.Options{HTTP: remote.NewClient(remote.Config{Doer: &recordingDoer{inner: cassette}}), Config: config})
+	registry := providers.NewRegistry(provider).WithImageListers(provider)
+
+	target := item.Item{Kind: item.KindMusicAlbum}
+	target.ProviderIDs.Set("MusicBrainzReleaseGroup", groupID)
+	refresh := library.RefreshContext{
+		Mode:            library.RefreshModeFullRefresh,
+		Image:           library.RefreshModeFullRefresh,
+		RunRemoteImages: true,
+		Options: library.LibraryOptions{TypeOptions: []library.TypeOptions{{
+			Type:             "MusicAlbum",
+			MetadataFetchers: []string{"MusicBrainz"},
+			ImageFetchers:    []string{"TheAudioDB"},
+		}}},
+	}
+	if err := registry.Refresh(t.Context(), refresh, &target); err != nil {
+		t.Fatal(err)
+	}
+	want := []item.ImageInfo{{Type: item.ImageTypePrimary, Path: "https://images.example/album-thumb.jpg"}}
+	if !reflect.DeepEqual(target.ImageInfos, want) {
+		t.Fatalf("images = %#v, want %#v", target.ImageInfos, want)
 	}
 }

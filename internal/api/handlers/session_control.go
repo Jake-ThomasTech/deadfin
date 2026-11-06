@@ -17,20 +17,41 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// SessionOwners sends a request for another client's session to the server
+// replica that owns the session (#663). ServeOnOwner reports whether it
+// answered the request.
+type SessionOwners interface {
+	ServeOnOwner(w http.ResponseWriter, request *http.Request, sessionID string) bool
+}
+
 // RegisterSessionControl registers jellyfin-web's remote-control controller
-// surface.
-func RegisterSessionControl(rt *router.Router, service *sessioncontrol.Service) {
-	handler := sessionControlHandler{service: service}
+// surface. owners is nil without server replicas.
+func RegisterSessionControl(rt *router.Router, service *sessioncontrol.Service, owners SessionOwners) {
+	handler := sessionControlHandler{service: service, owners: owners}
 	policy := string(auth.PolicyDefaultAuthorization)
-	rt.Handle(http.MethodPost, "/Sessions/{sessionId}/Playing", router.Route{OperationID: "Play", Policy: policy}, handler.play)
-	rt.Handle(http.MethodPost, "/Sessions/{sessionId}/Playing/{command}", router.Route{OperationID: "SendPlaystateCommand", Policy: policy}, handler.playstate)
-	rt.Handle(http.MethodPost, "/Sessions/{sessionId}/Command/{command}", router.Route{OperationID: "SendGeneralCommand", Policy: policy}, handler.general)
-	rt.Handle(http.MethodPost, "/Sessions/{sessionId}/Message", router.Route{OperationID: "SendMessageCommand", Policy: policy}, handler.message)
-	rt.Handle(http.MethodPost, "/Sessions/{sessionId}/Viewing", router.Route{OperationID: "DisplayContent", Policy: policy}, handler.view)
+	rt.Handle(http.MethodPost, "/Sessions/{sessionId}/Playing", router.Route{OperationID: "Play", Policy: policy}, handler.onOwner(handler.play))
+	rt.Handle(http.MethodPost, "/Sessions/{sessionId}/Playing/{command}", router.Route{OperationID: "SendPlaystateCommand", Policy: policy}, handler.onOwner(handler.playstate))
+	rt.Handle(http.MethodPost, "/Sessions/{sessionId}/Command/{command}", router.Route{OperationID: "SendGeneralCommand", Policy: policy}, handler.onOwner(handler.general))
+	rt.Handle(http.MethodPost, "/Sessions/{sessionId}/Message", router.Route{OperationID: "SendMessageCommand", Policy: policy}, handler.onOwner(handler.message))
+	rt.Handle(http.MethodPost, "/Sessions/{sessionId}/Viewing", router.Route{OperationID: "DisplayContent", Policy: policy}, handler.onOwner(handler.view))
 }
 
 type sessionControlHandler struct {
 	service *sessioncontrol.Service
+	owners  SessionOwners
+}
+
+// onOwner serves a command on the replica that holds the target session.
+func (handler sessionControlHandler) onOwner(next http.HandlerFunc) http.HandlerFunc {
+	if handler.owners == nil {
+		return next
+	}
+	return func(w http.ResponseWriter, request *http.Request) {
+		if handler.owners.ServeOnOwner(w, request, chi.URLParam(request, "sessionId")) {
+			return
+		}
+		next(w, request)
+	}
 }
 
 type playCommandQuery struct {

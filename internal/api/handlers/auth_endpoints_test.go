@@ -1406,7 +1406,7 @@ func newP104HarnessWithLoginNetwork(t *testing.T, network p104LoginNetwork) *p10
 	identities := map[string]auth.Identity{}
 	authorizer := middleware.NewAuthorizer(p104Resolver{identities: identities}, p104Evaluator{}, p104AuthorizerUsers{users: users})
 	rt := router.New(authorizer.Wrap)
-	handlers.RegisterAuth(rt, login, users, sessions, items, itemBuilder, identity, p104Startup{completed: true}, network, nil)
+	handlers.RegisterAuth(rt, login, users, sessions, items, itemBuilder, identity, p104Startup{completed: true}, network, nil, nil)
 	return &p104Harness{rt: rt, stores: stores, users: users, sessions: sessions, clock: fakeClock, identities: identities, loginPolicy: policy, identity: identity, legacyAuthorization: legacyAuthorization}
 }
 

@@ -16,6 +16,10 @@ type itemQueryIDRelation struct {
 	ctes    []string
 	current string
 	args    []any
+	// access is the visibility predicate over the items alias "items" when
+	// visibility is the only transform of filtered_ids. It takes the
+	// arguments after the filter arguments.
+	access string
 }
 
 func newItemQueryIDRelation(d Dialect, source, where string, filterArgs []any) itemQueryIDRelation {
@@ -37,6 +41,13 @@ func (r *itemQueryIDRelation) add(name, sql string) {
 	r.current = name
 }
 
+// addMaterialized adds a CTE that the database computes once instead of
+// inlining. PostgreSQL 12+ and SQLite 3.35+ accept AS MATERIALIZED.
+func (r *itemQueryIDRelation) addMaterialized(name, sql string) {
+	r.ctes = append(r.ctes, name+" AS MATERIALIZED ("+sql+")")
+	r.current = name
+}
+
 func (r *itemQueryIDRelation) addAuxiliary(name, sql string) {
 	r.ctes = append(r.ctes, name+" AS ("+sql+")")
 }
@@ -49,18 +60,18 @@ func (r *itemQueryIDRelation) withSQL() string {
 // upstream repository: base filters first; visibility and adjacency restrict
 // the filtered set; grouping chooses representative IDs; collapse may replace
 // children with BoxSets; and only then do deferred name ranges see replacements.
-func translateItemQueryIDRelation(query ItemQuery, d Dialect, source, where string, filterArgs []any) (string, string, []any, error) {
+func translateItemQueryIDRelation(query ItemQuery, d Dialect, source, where string, filterArgs []any) (itemQueryIDRelation, error) {
 	relation := newItemQueryIDRelation(d, source, where, filterArgs)
 	applyItemQueryRecursiveParent(&relation, query)
 	applyItemQueryAccess(&relation, query)
 	if err := applyItemQueryAdjacency(&relation, query); err != nil {
-		return "", "", nil, err
+		return itemQueryIDRelation{}, err
 	}
 	applyItemQueryGrouping(&relation, query)
 	applyItemQueryBoxSetCollapse(&relation, query)
 	applyExplicitItemIDs(&relation, query)
 	applyDeferredItemQueryNameRanges(&relation, query)
-	return relation.withSQL(), relation.current, relation.args, nil
+	return relation, nil
 }
 
 // applyItemQueryRecursiveParent is the generic recursive ParentId scope for a

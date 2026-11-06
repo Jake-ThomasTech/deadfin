@@ -72,6 +72,14 @@ func main() {
 		runAnimeIdentify(args[1:])
 		return
 	}
+	if len(args) > 0 && args[0] == "worker" {
+		runWorker(args[1:])
+		return
+	}
+	if len(args) > 0 && args[0] == "edge" {
+		runEdge(args[1:])
+		return
+	}
 	if len(args) > 0 && args[0] == "backfill" {
 		runBackfill(args[1:])
 		return
@@ -229,7 +237,7 @@ func runServer(ctx context.Context, listen, programData string, ready chan<- str
 	// wrap the router with the BaseUrl mount before passing it to the server.
 	network := app.ConfigManager().Network()
 	base := network.NormalizedBaseURL()
-	mountedHandler := router.Mount(base, app.Router())
+	mountedHandler := app.AcceptForwards(router.Mount(base, app.Router()))
 
 	// Start the optional UDP discovery responder when enabled. Construction
 	// binds the socket and starts the read goroutine. A bind failure is
@@ -286,7 +294,28 @@ func runServer(ctx context.Context, listen, programData string, ready chan<- str
 		default:
 		}
 	}
-	return httpServer.Serve(ctx, listener)
+	return httpServer.Serve(drainBeforeStop(ctx, app), listener)
+}
+
+// replicaDrainer hands a replica's work to its peers (#652).
+type replicaDrainer interface {
+	DrainReplica(context.Context) error
+}
+
+// drainBeforeStop returns the context that stops the HTTP server: it ends
+// after ctx, once the replica drain is over, so that the drained replica
+// still answers the requests that reach it during the handover. Without
+// replica mode the drain returns at once. The goroutine ends with ctx.
+func drainBeforeStop(ctx context.Context, drainer replicaDrainer) context.Context {
+	serve, stop := context.WithCancel(context.WithoutCancel(ctx))
+	go func() {
+		defer stop()
+		<-ctx.Done()
+		drain, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		defer cancel()
+		_ = drainer.DrainReplica(drain)
+	}()
+	return serve
 }
 
 type applicationCloser interface {

@@ -3,12 +3,14 @@
 package playback
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"strings"
 	"time"
@@ -37,6 +39,9 @@ var (
 	ErrDownloadNotAllowed = errors.New("download not allowed")
 	// ErrLiveStreamUnavailable identifies Live TV operations without a composed provider.
 	ErrLiveStreamUnavailable = errors.New("live stream provider unavailable")
+	// ErrLiveStreamBusy identifies a Live TV open refused because every
+	// tuner that carries the channel is in use.
+	ErrLiveStreamBusy = errors.New("live stream: all tuners are in use")
 	// ErrInvalidStoredDeviceProfile identifies malformed persisted device capability JSON.
 	ErrInvalidStoredDeviceProfile = errors.New("invalid stored device profile")
 	// ErrPlaySessionIDUnavailable identifies unavailable session entropy.
@@ -100,6 +105,38 @@ type LiveStreamProvider interface {
 	CloseLiveStream(context.Context, string) error
 }
 
+// LiveTvSources supplies the media sources of Live TV channels (upstream
+// LiveTvMediaSourceProvider) and the sources of opened live streams
+// (MediaSourceManager.GetLiveStream).
+type LiveTvSources interface {
+	// ChannelSources returns the sources of a channel; ok is false when the
+	// item is not a Live TV channel.
+	ChannelSources(ctx context.Context, itemID dto.UUID) (sources []MediaSourceInfo, ok bool, err error)
+	// LiveStream returns the source of an open live stream.
+	LiveStream(ctx context.Context, liveStreamID string) (MediaSourceInfo, bool)
+}
+
+// LiveStartup times the first open of a live stream, for the live HLS
+// startup trace. A zero time is a step that did not happen.
+type LiveStartup struct {
+	// Received is when PlaybackInfo asked to open the stream.
+	Received time.Time
+	// Connected is when the upstream answered, and FirstByte is when its
+	// first data arrived.
+	Connected time.Time
+	FirstByte time.Time
+	// Probed is when the media probe of the opened stream ended.
+	Probed time.Time
+	// Delivered counts the upstream bytes received so far.
+	Delivered int64
+}
+
+// LiveStartupSource is a LiveTvSources that reports the startup times of an
+// open live stream.
+type LiveStartupSource interface {
+	LiveStartup(liveStreamID string) (LiveStartup, bool)
+}
+
 // PlaybackInfoServiceConfig supplies the concrete orchestration dependencies.
 // Every dependency is typed so HTTP, store, session, user, and network adapters
 // map their own models exactly once at the application seam.
@@ -111,11 +148,14 @@ type PlaybackInfoServiceConfig struct {
 	Network          PlaybackNetworkClassifier
 	NewPlaySessionID func() string
 	LiveStreams      LiveStreamProvider
+	LiveTv           LiveTvSources
 	Selection        SourceSelectionReader
 	Languages        LanguageNormalizer
 	Paths            VirtualPathExpander
 	// Encoding decides whether a non-SDR source can transcode.
 	Encoding TranscodeEncoding
+	// Logger receives Live TV open failures; nil discards them.
+	Logger *slog.Logger
 }
 
 // PlaybackInfoApplication is the concrete PlaybackInfoService implementation.
@@ -128,15 +168,20 @@ type PlaybackInfoApplication struct {
 	network          PlaybackNetworkClassifier
 	newPlaySessionID func() string
 	liveStreams      LiveStreamProvider
+	liveTv           LiveTvSources
 	selection        SourceSelectionReader
 	languages        LanguageNormalizer
 	paths            VirtualPathExpander
 	encoding         TranscodeEncoding
+	logger           *slog.Logger
 }
 
 // NewPlaybackInfoService constructs the concrete playback orchestration
 // service. Nil optional adapters retain their stock no-provider behavior.
 func NewPlaybackInfoService(config PlaybackInfoServiceConfig) *PlaybackInfoApplication {
+	if config.Logger == nil {
+		config.Logger = slog.New(slog.DiscardHandler)
+	}
 	return &PlaybackInfoApplication{
 		sources:          config.Sources,
 		access:           config.Access,
@@ -145,10 +190,12 @@ func NewPlaybackInfoService(config PlaybackInfoServiceConfig) *PlaybackInfoAppli
 		network:          config.Network,
 		newPlaySessionID: config.NewPlaySessionID,
 		liveStreams:      config.LiveStreams,
+		liveTv:           config.LiveTv,
 		selection:        config.Selection,
 		languages:        config.Languages,
 		paths:            config.Paths,
 		encoding:         config.Encoding,
+		logger:           config.Logger,
 	}
 }
 
@@ -190,6 +237,15 @@ func (service *PlaybackInfoApplication) PlaybackInfo(ctx context.Context, reques
 			return PlaybackInfoResponse{}, ErrItemNotFound
 		}
 	}
+	if service.liveTv != nil {
+		sources, isChannel, err := service.liveTv.ChannelSources(ctx, request.ItemID)
+		if err != nil {
+			return PlaybackInfoResponse{}, err
+		}
+		if isChannel {
+			return service.liveTvPlaybackInfo(ctx, request, sources)
+		}
+	}
 	records, err := assembleMediaSourceRecords(ctx, service.sources, request.ItemID)
 	if err != nil {
 		return PlaybackInfoResponse{}, err
@@ -211,36 +267,11 @@ func (service *PlaybackInfoApplication) PlaybackInfo(ctx context.Context, reques
 			selection = &resolved
 		}
 	}
-	rawSourceProjection := false
-	if !request.AssemblyOnly {
-		if request.DeviceProfile == nil && service.deviceProfiles != nil {
-			request.DeviceProfile, err = service.deviceProfiles.DeviceProfile(ctx, request.Client, request.DeviceID)
-			if err != nil {
-				return PlaybackInfoResponse{}, err
-			}
-		}
-		if request.DeviceProfile == nil {
-			request.AssemblyOnly = true
-			rawSourceProjection = true
-		}
-		if service.permissions != nil {
-			request.Permissions, err = service.permissions.PlaybackPermissions(ctx, request.UserID)
-			if err != nil {
-				return PlaybackInfoResponse{}, err
-			}
-		}
-		if service.network != nil {
-			request.Network = PlaybackNetwork{IsLAN: !request.ClientAddress.IsValid() || service.network.IsLAN(request.ClientAddress)}
-		}
-	}
-	playSessionID, err := service.newSessionID()
+	rawSourceProjection, err := service.prepareRequest(ctx, &request)
 	if err != nil {
 		return PlaybackInfoResponse{}, err
 	}
-	request.Session.ID = playSessionID
-	if request.Session.DeviceID == "" {
-		request.Session.DeviceID = request.DeviceID
-	}
+	playSessionID := request.Session.ID
 	if request.AssemblyOnly {
 		sources := MediaSourcesFromRecords(records)
 		if rawSourceProjection {
@@ -267,6 +298,146 @@ func (service *PlaybackInfoApplication) PlaybackInfo(ctx context.Context, reques
 		response.MediaSources = reorderResolvedPlaybackSources(response.MediaSources, *selection)
 	}
 	return response, nil
+}
+
+// prepareRequest fills the current device profile, permissions, network
+// and a new play session ID into request. rawSourceProjection reports a
+// request that falls back to assembly because no device profile exists.
+func (service *PlaybackInfoApplication) prepareRequest(ctx context.Context, request *PlaybackInfoRequest) (rawSourceProjection bool, err error) {
+	if !request.AssemblyOnly {
+		if request.DeviceProfile == nil && service.deviceProfiles != nil {
+			request.DeviceProfile, err = service.deviceProfiles.DeviceProfile(ctx, request.Client, request.DeviceID)
+			if err != nil {
+				return false, err
+			}
+		}
+		if request.DeviceProfile == nil {
+			request.AssemblyOnly = true
+			rawSourceProjection = true
+		}
+		if service.permissions != nil {
+			request.Permissions, err = service.permissions.PlaybackPermissions(ctx, request.UserID)
+			if err != nil {
+				return false, err
+			}
+		}
+		if service.network != nil {
+			request.Network = PlaybackNetwork{IsLAN: !request.ClientAddress.IsValid() || service.network.IsLAN(request.ClientAddress)}
+		}
+	}
+	playSessionID, err := service.newSessionID()
+	if err != nil {
+		return false, err
+	}
+	request.Session.ID = playSessionID
+	if request.Session.DeviceID == "" {
+		request.Session.DeviceID = request.DeviceID
+	}
+	return rawSourceProjection, nil
+}
+
+// liveTvPlaybackInfo ports the Live TV half of MediaInfoController
+// PostPlaybackInfo (MediaInfoController.cs:116-260) and
+// MediaInfoHelper.GetPlaybackInfo (MediaInfoHelper.cs:111-116): a request
+// with a LiveStreamId answers that open stream; AutoOpenLiveStream opens
+// the channel and answers the opened source only. A busy tuner answers
+// ErrorCode NoCompatibleStream with no source.
+func (service *PlaybackInfoApplication) liveTvPlaybackInfo(ctx context.Context, request PlaybackInfoRequest, sources []MediaSourceInfo) (PlaybackInfoResponse, error) {
+	if request.LiveStreamID != "" {
+		source, found := service.liveTv.LiveStream(ctx, request.LiveStreamID)
+		if !found {
+			return PlaybackInfoResponse{}, ErrItemNotFound
+		}
+		sources = []MediaSourceInfo{source}
+	}
+	if _, err := service.prepareRequest(ctx, &request); err != nil {
+		return PlaybackInfoResponse{}, err
+	}
+	playSessionID := request.Session.ID
+	if request.LiveStreamID == "" && request.AutoOpenLiveStream && len(sources) > 0 && sources[0].RequiresOpening && sources[0].LiveStreamID == "" {
+		if service.liveStreams == nil {
+			return PlaybackInfoResponse{}, ErrLiveStreamUnavailable
+		}
+		opened, err := service.liveStreams.OpenLiveStream(ctx, OpenLiveStreamRequest{
+			OpenToken:                           sources[0].OpenToken,
+			UserID:                              request.UserID,
+			PlaySessionID:                       playSessionID,
+			DeviceID:                            request.Session.DeviceID,
+			MaxStreamingBitrate:                 request.MaxStreamingBitrate,
+			StartTimeTicks:                      request.StartTimeTicks,
+			AudioStreamIndex:                    request.AudioStreamIndex,
+			SubtitleStreamIndex:                 request.SubtitleStreamIndex,
+			MaxAudioChannels:                    request.MaxAudioChannels,
+			ItemID:                              request.ItemID,
+			DeviceProfile:                       request.DeviceProfile,
+			EnableDirectPlay:                    request.EnableDirectPlay,
+			EnableDirectStream:                  request.EnableDirectStream,
+			AlwaysBurnInSubtitleWhenTranscoding: request.AlwaysBurnInSubtitleWhenTranscoding,
+		})
+		if errors.Is(err, ErrLiveStreamBusy) {
+			service.logger.Warn("live tv: open refused, all tuners in use", "itemId", request.ItemID.String(), "error", err)
+			return PlaybackInfoResponse{MediaSources: []MediaSourceInfo{}, PlaySessionID: playSessionID, ErrorCode: PlaybackInfoNoCompatibleStream}, nil
+		}
+		if err != nil {
+			service.logger.Warn("live tv: open failed", "itemId", request.ItemID.String(), "error", err)
+			return PlaybackInfoResponse{}, err
+		}
+		sources = []MediaSourceInfo{opened.MediaSource}
+		// Upstream negotiates the opened source by its own id
+		// (MediaInfoHelper.OpenMediaSource).
+		request.MediaSourceID = opened.MediaSource.ID
+	}
+	if request.AssemblyOnly {
+		return PlaybackInfoResponse{MediaSources: sources, PlaySessionID: playSessionID}, nil
+	}
+	request.MediaType = sourceMediaType(sources)
+	request.CanTranscodeVideo = service.encoding.CanTranscodeVideo
+	request.CanExtractSubtitles = service.encoding.CanExtractSubtitles
+	response, err := ResolvePlaybackInfo(request, sources)
+	if err != nil || response.ErrorCode != PlaybackInfoNoCompatibleStream || len(sources) == 0 {
+		return response, err
+	}
+	service.logger.Warn("live tv: no compatible stream for the channel source",
+		append([]any{"itemId", request.ItemID.String(), "opened", sources[0].LiveStreamID != ""}, noCompatibleDetail(request, sources[0])...)...)
+	if liveStreamID := sources[0].LiveStreamID; liveStreamID != "" && request.LiveStreamID == "" {
+		// The client gets no source to close, so the open would hold the
+		// tuner until the broker's idle timeout.
+		if err := service.liveStreams.CloseLiveStream(ctx, liveStreamID); err != nil {
+			service.logger.Warn("live tv: close of the unplayable stream failed", "liveStreamId", liveStreamID, "error", err)
+		}
+	}
+	return response, nil
+}
+
+// noCompatibleDetail names what the resolver compared: the source, and the
+// client's direct play and transcoding containers.
+func noCompatibleDetail(request PlaybackInfoRequest, source MediaSourceInfo) []any {
+	var video, audio string
+	if stream := source.VideoStream(); stream != nil {
+		video = stream.Codec
+	}
+	for _, stream := range source.MediaStreams {
+		if stream.Type == StreamTypeAudio {
+			audio = stream.Codec
+			break
+		}
+	}
+	var directPlay, transcoding []string
+	if profile := request.DeviceProfile; profile != nil {
+		for _, candidate := range profile.DirectPlayProfiles {
+			directPlay = append(directPlay, cmp.Or(candidate.Container, "*"))
+		}
+		for _, candidate := range profile.TranscodingProfiles {
+			transcoding = append(transcoding, cmp.Or(candidate.Container, "*"))
+		}
+	}
+	return []any{
+		"container", source.Container, "videoCodec", video, "audioCodec", audio,
+		"supportsDirectPlay", source.SupportsDirectPlay, "supportsDirectStream", source.SupportsDirectStream,
+		"supportsTranscoding", source.SupportsTranscoding, "mostCompatibleOnly", source.UseMostCompatibleTranscodingProfile,
+		"directPlayProfiles", strings.Join(directPlay, ","), "transcodingProfiles", strings.Join(transcoding, ","),
+		"enableTranscoding", request.Permissions.EnableVideoTranscoding, "enableRemuxing", request.Permissions.EnableRemuxing,
+	}
 }
 
 // reorderResolvedPlaybackSources restores the primary item's resumable
@@ -630,9 +801,12 @@ func (source playbackInfoMediaSource) MarshalJSON() ([]byte, error) {
 }
 
 type OpenLiveStreamRequest struct {
-	OpenToken                           string
-	UserID                              dto.UUID
-	PlaySessionID                       string
+	OpenToken     string
+	UserID        dto.UUID
+	PlaySessionID string
+	// DeviceID is the requesting device. Its other live streams on the
+	// same tuner are released before the open (D-92).
+	DeviceID                            string
 	MaxStreamingBitrate                 *int
 	StartTimeTicks                      *int64
 	AudioStreamIndex                    *int

@@ -393,8 +393,10 @@ func buildOpenAIOp(oa openAPIOperation, routes map[string]snapshotRoute, results
 		return op
 	}
 
-	// Step 2: registered intentional stub (LiveTv/SyncPlay).
-	if registered && isStubSubystem(oa.Tag) {
+	// Step 2: registered intentional stub (LiveTv/SyncPlay). An
+	// implemented annotation marks a route of those subsystems that serves
+	// real behavior; it continues to the evidence steps.
+	if registered && isStubSubystem(oa.Tag) && !(hasAnn && ann.Status == "implemented") {
 		op.Status = "stubbed"
 		op.Disposition = "deferred"
 		op.Reason = "intentional stub per D2"

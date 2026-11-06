@@ -1,0 +1,51 @@
+# Image smoke of a transcode worker (#623): one server in workers-only mode
+# and one worker on plain HTTP inside the compose network. tools/worker-smoke
+# drives it; it is not an install example (docs/transcode-workers.md is).
+name: deadfin-worker-smoke
+
+x-image: &image ${DEADFIN_IMAGE:?set DEADFIN_IMAGE}
+
+services:
+  media:
+    image: *image
+    # Root, to own the new volume; the clip is handed to the server user.
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    # A 30 s MPEG-2 clip: an h264 request transcodes it.
+    command:
+      - >-
+        mkdir -p "/media/movies/Smoke (2026)" &&
+        test -s "/media/movies/Smoke (2026)/Smoke (2026).mkv" ||
+        ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=1280x720:rate=24
+        -f lavfi -i sine=frequency=440:sample_rate=48000 -t 30
+        -c:v mpeg2video -q:v 4 -c:a mp2 "/media/movies/Smoke (2026)/Smoke (2026).mkv" &&
+        chown -R 65532:65532 /media
+    volumes:
+      - media:/media
+
+  server:
+    image: *image
+    depends_on:
+      media:
+        condition: service_completed_successfully
+    environment:
+      DEADFIN_TRANSCODE_WORKER_TOKENS: ${DEADFIN_WORKER_TOKEN:?set DEADFIN_WORKER_TOKEN}
+      DEADFIN_TRANSCODE_WORKERS_ALLOW_HTTP: "true"
+      DEADFIN_TRANSCODE_WORKER_MODE: workers-only
+    ports:
+      - "127.0.0.1:${DEADFIN_SMOKE_PORT:-18096}:8096"
+    volumes:
+      - media:/media:ro
+      - data:/var/lib/deadfin
+
+  worker:
+    image: *image
+    depends_on: [server]
+    environment:
+      DEADFIN_WORKER_TOKEN: ${DEADFIN_WORKER_TOKEN}
+    command: [worker, -server=http://server:8096, -insecure, -name=smoke, -input-mode=stream, -work-dir=/tmp/work]
+    restart: on-failure
+
+volumes:
+  media: {}
+  data: {}

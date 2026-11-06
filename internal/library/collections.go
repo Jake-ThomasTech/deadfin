@@ -367,11 +367,14 @@ func (s *Scanner) AddMoviesToCollections(ctx context.Context, progress func(floa
 // the lowest ID. Upstream TmdbBoxSetProvider only searches TMDb by the
 // collection name. The members' ID also finds a collection whose name
 // differs from TMDb's (divergence D-116).
+//
+// A BoxSet Tmdb ID is a TMDb collection ID. A stored Tmdb ID that is the
+// Tmdb ID of a member movie, and no member's TmdbCollection ID, is a movie
+// ID: it is replaced by the members' collection ID, or removed so that the
+// provider searches by name (deadfin#846). A member TmdbCollection ID that is
+// the member's own Tmdb ID is not used.
 func (s *Scanner) resolveBoxSetTmdbID(ctx context.Context, candidate *item.Item) error {
 	if candidate.Kind != item.KindBoxSet || candidate.ID.IsNil() {
-		return nil
-	}
-	if id, ok := candidate.ProviderIDs.Get("Tmdb"); ok && strings.TrimSpace(id) != "" {
 		return nil
 	}
 	parentID := candidate.ID
@@ -380,12 +383,26 @@ func (s *Scanner) resolveBoxSetTmdbID(ctx context.Context, candidate *item.Item)
 		return fmt.Errorf("list collection members of %s: %w", candidate.ID, err)
 	}
 	counts := map[string]int{}
+	movieIDs := map[string]struct{}{}
 	for _, member := range members.Items {
+		movieID, _ := member.ProviderIDs.Get("Tmdb")
+		if movieID = strings.TrimSpace(movieID); movieID != "" {
+			movieIDs[movieID] = struct{}{}
+		}
 		if id, ok := member.ProviderIDs.Get("TmdbCollection"); ok {
-			if id = strings.TrimSpace(id); id != "" {
+			if id = strings.TrimSpace(id); id != "" && id != movieID {
 				counts[id]++
 			}
 		}
+	}
+	if id, ok := candidate.ProviderIDs.Get("Tmdb"); ok && strings.TrimSpace(id) != "" {
+		id = strings.TrimSpace(id)
+		_, isMovie := movieIDs[id]
+		if _, isCollection := counts[id]; !isMovie || isCollection {
+			return nil
+		}
+		s.logger.Warn("collection has a movie TMDb id; replacing it", "collection", candidate.ID.String(), "tmdbId", id)
+		candidate.ProviderIDs = withoutProviderID(candidate.ProviderIDs, "Tmdb")
 	}
 	best, bestCount, bestNumber := "", 0, 0
 	for id, count := range counts {
@@ -401,4 +418,15 @@ func (s *Scanner) resolveBoxSetTmdbID(ctx context.Context, candidate *item.Item)
 		candidate.ProviderIDs.Set("Tmdb", best)
 	}
 	return nil
+}
+
+// withoutProviderID returns ids without the name key.
+func withoutProviderID(ids item.ProviderIDs, name string) item.ProviderIDs {
+	var out item.ProviderIDs
+	for _, id := range ids.Snapshot() {
+		if !strings.EqualFold(id.Name, name) {
+			out.Set(id.Name, id.Value)
+		}
+	}
+	return out
 }

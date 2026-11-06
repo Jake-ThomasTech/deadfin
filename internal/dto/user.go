@@ -161,6 +161,10 @@ type UserPolicy struct {
 	AuthenticationProviderID         string         `json:"AuthenticationProviderId"`
 	PasswordResetProviderID          string         `json:"PasswordResetProviderId"`
 	SyncPlayAccess                   SyncPlayAccess `json:"SyncPlayAccess"`
+	// LimitLiveTvToSharedLists is Deadfin-only (D-105): when true, the user
+	// sees a Live TV channel only if a playlist the user can see links it.
+	// Absent is false. A policy save that omits it keeps the stored value.
+	LimitLiveTvToSharedLists *bool `json:"LimitLiveTvToSharedLists,omitempty"`
 }
 
 // DecodeUserPolicy validates a persisted UserPolicy document before decoding it

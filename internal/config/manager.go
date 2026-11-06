@@ -568,6 +568,7 @@ type Manager struct {
 	network  configurationSnapshot[NetworkConfiguration]
 	metadata configurationSnapshot[MetadataConfiguration]
 	encoding configurationSnapshot[EncodingOptions]
+	livetv   configurationSnapshot[LiveTvOptions]
 
 	xbmcMetadata configurationSnapshot[XbmcMetadataOptions]
 }
@@ -614,6 +615,7 @@ func Open(ctx context.Context, paths Paths, changes *events.Bus[Change]) (*Manag
 	if err != nil {
 		return nil, err
 	}
+	livetv, err := loadConfiguration(filepath.Join(paths.Config, LiveTvFile), DefaultLiveTvOptions, false)
 	xbmcMetadata, err := loadConfiguration(filepath.Join(paths.Config, XbmcMetadataFile), DefaultXbmcMetadataOptions, false)
 	if err != nil {
 		return nil, err
@@ -630,6 +632,7 @@ func Open(ctx context.Context, paths Paths, changes *events.Bus[Change]) (*Manag
 		network:  configurationSnapshot[NetworkConfiguration]{value: network},
 		metadata: configurationSnapshot[MetadataConfiguration]{value: metadata},
 		encoding: configurationSnapshot[EncodingOptions]{value: encodingOptions},
+		livetv:   configurationSnapshot[LiveTvOptions]{value: livetv},
 
 		xbmcMetadata: configurationSnapshot[XbmcMetadataOptions]{value: xbmcMetadata},
 	}, nil

@@ -286,7 +286,9 @@ func collectionImageName(imageType item.ImageType) (string, bool) {
 }
 
 // keepCollectionMetadata adds the Jellyfin provider IDs the collection does
-// not have, and keeps the Jellyfin images. An image file is copied into the
+// not have, and keeps the Jellyfin images. The Jellyfin Tmdb ID (the
+// collection.xml TmdbId) is the TMDb collection ID, so it also replaces a
+// different stored Tmdb ID, which can be a member's movie ID (deadfin#846). An image file is copied into the
 // collection directory under its local image name, so later scans keep it;
 // an image URL is stored as a remote image. A type that the collection has
 // already is not changed, so a rerun changes nothing. It reports whether
@@ -299,8 +301,9 @@ func keepCollectionMetadata(collection *item.Item, value jfimport.CollectionImpo
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if _, found := collection.ProviderIDs.Get(name); !found {
-			collection.ProviderIDs.Set(name, value.ProviderIDs[name])
+		stored, found := collection.ProviderIDs.Get(name)
+		if !found || strings.EqualFold(name, "Tmdb") && strings.TrimSpace(stored) != strings.TrimSpace(value.ProviderIDs[name]) {
+			collection.ProviderIDs.Set(name, strings.TrimSpace(value.ProviderIDs[name]))
 			changed = true
 		}
 	}

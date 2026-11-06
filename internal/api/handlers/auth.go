@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/netip"
 
@@ -25,8 +24,8 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-func RegisterAuth(rt *router.Router, login *auth.Login, users *user.Service, sessions *session.Manager, items *store.ItemStore, itemBuilder *dtobuild.Builder, identity config.ServerIdentity, startup interface{ StartupWizardCompleted() bool }, network auth.LocalNetwork, transcoding sessiondto.TranscodingSource) {
-	h := authHandler{login: login, users: users, sessions: sessions, items: items, itemBuilder: itemBuilder, identity: identity, startup: startup, network: network, transcoding: transcoding}
+func RegisterAuth(rt *router.Router, login *auth.Login, users *user.Service, sessions *session.Manager, items *store.ItemStore, itemBuilder *dtobuild.Builder, identity config.ServerIdentity, startup interface{ StartupWizardCompleted() bool }, network auth.LocalNetwork, transcoding sessiondto.TranscodingSource, peers SessionPeers) {
+	h := authHandler{login: login, users: users, sessions: sessions, items: items, itemBuilder: itemBuilder, identity: identity, startup: startup, network: network, transcoding: transcoding, peers: peers}
 	rt.Handle(http.MethodPost, "/Users/AuthenticateByName", router.Route{OperationID: "AuthenticateUserByName", Anonymous: true}, h.loginByName)
 	rt.Handle(http.MethodPost, "/Users/{userId}/Authenticate", router.Route{OperationID: "SHADOW:AuthenticateUser", Anonymous: true}, h.loginLegacy)
 	rt.Handle(http.MethodGet, "/Users/Me", router.Route{OperationID: "GetCurrentUser", Policy: string(auth.PolicyDefaultAuthorization)}, h.me)
@@ -58,6 +57,13 @@ type authHandler struct {
 	identity config.ServerIdentity
 	startup  interface{ StartupWizardCompleted() bool }
 	network  auth.LocalNetwork
+	peers    SessionPeers
+}
+
+// SessionPeers returns the other server replicas' parts of a GET /Sessions
+// answer (#663); nil without replicas.
+type SessionPeers interface {
+	PeerSessions(request *http.Request) []dto.SessionInfoDto
 }
 
 func (h authHandler) loginByName(w http.ResponseWriter, r *http.Request) { h.loginRequest(w, r, "") }
@@ -362,6 +368,9 @@ func (h authHandler) sessionsList(w http.ResponseWriter, r *http.Request) {
 		}
 		out[i] = h.projectSession(r.Context(), s[i], name, h.identity.ID.String())
 	}
+	if h.peers != nil {
+		out = sessiondto.Merge(out, h.peers.PeerSessions(r))
+	}
 	_ = render.JSON(w, r, http.StatusOK, out)
 }
 
@@ -454,14 +463,13 @@ func deviceProfileBytes(profile *json.RawMessage) []byte {
 }
 
 func requestRemoteHost(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
+	return middleware.RemoteEndpoint(r)
 }
 
 func requestRemoteIP(r *http.Request) netip.Addr {
+	if address := middleware.ClientAddressFromContext(r.Context()); address.IsValid() {
+		return address
+	}
 	return middleware.NormalizeClientAddress(r.RemoteAddr)
 }
 

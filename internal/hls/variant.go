@@ -470,3 +470,29 @@ func validatePlaylistRequest(request MainPlaylistRequest) error {
 	}
 	return nil
 }
+
+// MainPlaylistSegment returns the start and length of one segment of the
+// media playlist that CreateMainPlaylist renders for request, in ticks: the
+// runtimeTicks and actualSegmentLengthTicks of its segment URL. A transcode
+// handoff uses it to restart a family at a segment no client has asked for
+// yet (#617).
+func MainPlaylistSegment(ctx context.Context, request MainPlaylistRequest, index int) (startTicks, lengthTicks int64, err error) {
+	if request.SegmentLengthMilliseconds <= 0 || request.RunTimeTicks <= 0 {
+		return 0, 0, fmt.Errorf("invalid segment length (%d) or runtime ticks (%d)", request.SegmentLengthMilliseconds, request.RunTimeTicks)
+	}
+	segmentTicks, err := segmentTicksFromMilliseconds(request.SegmentLengthMilliseconds)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := preflightMainPlaylist(request, segmentTicks); err != nil {
+		return 0, 0, err
+	}
+	segments, err := mainPlaylistSegments(ctx, request)
+	if err != nil {
+		return 0, 0, err
+	}
+	if index < 0 || index >= len(segments) {
+		return 0, 0, fmt.Errorf("segment %d is outside the playlist (%d segments)", index, len(segments))
+	}
+	return segments[index].startTicks, segments[index].lengthTicks, nil
+}

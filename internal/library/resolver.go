@@ -183,6 +183,15 @@ type RefreshContext struct {
 	// Identify sets it: upstream MetadataService does not run local metadata
 	// providers when the refresh carries a SearchResult.
 	SkipLocalMetadata bool
+	// RunRemoteImages runs the remote image providers (ImageFetchers) after
+	// the remote metadata stage. The scanner sets it when upstream
+	// MetadataService.GetNonLocalImageProviders runs all of them: the image
+	// mode is FullRefresh, or the item has no refresh yet.
+	RunRemoteImages bool
+	// StoredImages is a copy of the stored item's images. The remote image
+	// stage does not fetch a type the stored item has, unless the refresh
+	// replaces all images.
+	StoredImages []item.ImageInfo
 	// Ancestors is a copy of the target's ancestor identity facts, nearest
 	// first. Hierarchy-aware providers read the parent series from it, as
 	// upstream SeasonInfo/EpisodeInfo carry SeriesProviderIds and

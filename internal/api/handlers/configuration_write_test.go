@@ -409,7 +409,7 @@ func TestConfigurationWriteErrorsMatchUpstreamStatus(t *testing.T) {
 		{name: "null body", path: "/System/Configuration/encoding", body: "null", status: http.StatusBadRequest},
 		{name: "array body", path: "/System/Configuration/network", body: "[]", status: http.StatusBadRequest},
 		{name: "wrong member type", path: "/System/Configuration", body: `{"MinResumePct":"many"}`, status: http.StatusBadRequest},
-		{name: "unknown key", path: "/System/Configuration/livetv", body: `{}`, status: http.StatusNotFound},
+		{name: "unknown key", path: "/System/Configuration/notakey", body: `{}`, status: http.StatusNotFound},
 		{name: "missing metadata path", path: "/System/Configuration", body: `{"MetadataPath":"` + missing + `"}`, status: http.StatusNotFound},
 		{name: "missing cache path", path: "/System/Configuration", body: `{"CachePath":"` + missing + `"}`, status: http.StatusNotFound},
 		{name: "missing transcode path", path: "/System/Configuration/encoding", body: `{"TranscodingTempPath":"` + missing + `"}`, status: http.StatusNotFound},

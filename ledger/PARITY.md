@@ -5,9 +5,9 @@ Edit `ledger/annotations.yaml` and `ledger/shadow-spec.yaml`, then run `make led
 
 ## Source
 
-- Deadfin revision: `46fd154a9d1aa4ac0ad91ef3b6bb786489de7090`
+- Deadfin revision: `d0325df5c7117a31078dff35ce9dff7ba52ec10b`
 - Jellyfin pin: `b04614e18d2aeed8d3d3de920c381c6bd5b97bdb`
-- Route count: 337
+- Route count: 345
 - OpenAPI version: 12.0.0
 
 ## Swiftfin REST parity
@@ -37,7 +37,7 @@ These SDK conveniences are not counted in the REST parity fraction:
 | Branding | 0 | 3 | 0 | 0 | 0 | 3 |
 | Channel | 0 | 0 | 0 | 5 | 0 | 5 |
 | Collection | 0 | 3 | 0 | 0 | 0 | 3 |
-| Device | 0 | 0 | 0 | 5 | 0 | 5 |
+| Device | 0 | 5 | 0 | 0 | 0 | 5 |
 | DisplayPreference | 0 | 2 | 0 | 0 | 0 | 2 |
 | Environment | 0 | 5 | 0 | 0 | 0 | 5 |
 | Filter | 0 | 2 | 0 | 0 | 0 | 2 |
@@ -51,7 +51,7 @@ These SDK conveniences are not counted in the REST parity fraction:
 | Items | 0 | 3 | 0 | 1 | 0 | 4 |
 | Library | 0 | 28 | 0 | 6 | 0 | 34 |
 | LibraryStructure | 6 | 0 | 0 | 2 | 0 | 8 |
-| LiveTv | 0 | 0 | 38 | 0 | 0 | 38 |
+| LiveTv | 0 | 17 | 21 | 0 | 0 | 38 |
 | LiveTvRecordings | 0 | 0 | 0 | 2 | 0 | 2 |
 | Localization | 0 | 4 | 0 | 0 | 0 | 4 |
 | Lyric | 0 | 0 | 0 | 6 | 0 | 6 |
@@ -74,7 +74,7 @@ These SDK conveniences are not counted in the REST parity fraction:
 | Subtitle | 0 | 5 | 0 | 5 | 0 | 10 |
 | Suggestion | 0 | 0 | 0 | 1 | 0 | 1 |
 | SyncPlay | 0 | 0 | 22 | 0 | 0 | 22 |
-| System | 0 | 13 | 0 | 6 | 0 | 19 |
+| System | 0 | 15 | 0 | 4 | 0 | 19 |
 | Trailer | 0 | 0 | 0 | 1 | 0 | 1 |
 | TrickPlay | 0 | 2 | 0 | 0 | 0 | 2 |
 | User | 0 | 19 | 0 | 1 | 0 | 20 |
@@ -113,16 +113,16 @@ These SDK conveniences are not counted in the REST parity fraction:
 | AuthenticateUserByName | partial | — |
 | AuthenticateWithQuickConnect | partial | — |
 | AuthorizeQuickConnect | partial | — |
-| CreateKey | partial | deferred: API key management not implemented |
+| CreateKey | partial | — |
 | ForgotPassword | deferred | deferred: password reset not implemented |
 | ForgotPasswordPin | deferred | deferred: password reset not implemented |
 | GetAuthProviders | deferred | deferred: auth provider config not implemented |
-| GetKeys | partial | deferred: API key management not implemented |
+| GetKeys | partial | — |
 | GetPasswordResetProviders | deferred | deferred: password reset provider config not implemented |
 | GetQuickConnectEnabled | partial | — |
 | GetQuickConnectState | partial | — |
 | InitiateQuickConnect | partial | — |
-| RevokeKey | partial | deferred: API key management not implemented |
+| RevokeKey | partial | — |
 
 ### Backup
 
@@ -163,11 +163,11 @@ These SDK conveniences are not counted in the REST parity fraction:
 
 | Operation | Status | Reason |
 |---|---|---|
-| DeleteDevice | deferred | deferred: device management not implemented |
-| GetDeviceInfo | deferred | deferred: device management not implemented |
-| GetDeviceOptions | deferred | deferred: device management not implemented |
-| GetDevices | deferred | deferred: device management not implemented |
-| UpdateDeviceOptions | deferred | deferred: device management not implemented |
+| DeleteDevice | partial | — |
+| GetDeviceInfo | partial | — |
+| GetDeviceOptions | partial | — |
+| GetDevices | partial | — |
+| UpdateDeviceOptions | partial | — |
 
 ### DisplayPreference
 
@@ -368,31 +368,31 @@ These SDK conveniences are not counted in the REST parity fraction:
 
 | Operation | Status | Reason |
 |---|---|---|
-| AddListingProvider | stubbed | intentional stub per D2 |
-| AddTunerHost | stubbed | intentional stub per D2 |
+| AddListingProvider | partial | Live TV P5b admin API (#541) |
+| AddTunerHost | partial | Live TV P5b admin API (#541) |
 | CancelSeriesTimer | stubbed | intentional stub per D2 |
 | CancelTimer | stubbed | intentional stub per D2 |
 | CreateSeriesTimer | stubbed | intentional stub per D2 |
 | CreateTimer | stubbed | intentional stub per D2 |
-| DeleteListingProvider | stubbed | intentional stub per D2 |
+| DeleteListingProvider | partial | Live TV P5b admin API (#541) |
 | DeleteRecording | stubbed | intentional stub per D2 |
-| DeleteTunerHost | stubbed | intentional stub per D2 |
+| DeleteTunerHost | partial | Live TV P5b admin API (#541) |
 | DiscoverTuners | stubbed | intentional stub per D2 |
 | DiscvoverTuners | stubbed | intentional stub per D2 |
-| GetChannel | stubbed | intentional stub per D2 |
-| GetChannelMappingOptions | stubbed | intentional stub per D2 |
-| GetDefaultListingProvider | stubbed | intentional stub per D2 |
+| GetChannel | partial | Live TV P6 read API (#541) |
+| GetChannelMappingOptions | partial | Live TV P5b admin API (#541) |
+| GetDefaultListingProvider | partial | Live TV P5b admin API (#541) |
 | GetDefaultTimer | stubbed | intentional stub per D2 |
-| GetGuideInfo | stubbed | intentional stub per D2 |
-| GetLineups | stubbed | intentional stub per D2 |
+| GetGuideInfo | partial | Live TV P5b admin API (#541) |
+| GetLineups | partial | Live TV P5b admin API (#541) |
 | GetLiveRecordingFile | stubbed | intentional stub per D2 |
 | GetLiveStreamFile | stubbed | intentional stub per D2 |
-| GetLiveTvChannels | stubbed | intentional stub per D2 |
-| GetLiveTvInfo | stubbed | intentional stub per D2 |
-| GetLiveTvPrograms | stubbed | intentional stub per D2 |
-| GetProgram | stubbed | intentional stub per D2 |
-| GetPrograms | stubbed | intentional stub per D2 |
-| GetRecommendedPrograms | stubbed | intentional stub per D2 |
+| GetLiveTvChannels | partial | Live TV P6 read API (#541) |
+| GetLiveTvInfo | partial | Live TV P6 read API (#541) |
+| GetLiveTvPrograms | partial | Live TV P6 read API (#541) |
+| GetProgram | partial | Live TV P6 read API (#541) |
+| GetPrograms | partial | Live TV P6 read API (#541) |
+| GetRecommendedPrograms | partial | Live TV P6 read API (#541) |
 | GetRecording | stubbed | intentional stub per D2 |
 | GetRecordingFolders | stubbed | intentional stub per D2 |
 | GetRecordings | stubbed | intentional stub per D2 |
@@ -401,9 +401,9 @@ These SDK conveniences are not counted in the REST parity fraction:
 | GetSeriesTimers | stubbed | intentional stub per D2 |
 | GetTimer | stubbed | intentional stub per D2 |
 | GetTimers | stubbed | intentional stub per D2 |
-| GetTunerHostTypes | stubbed | intentional stub per D2 |
+| GetTunerHostTypes | partial | Live TV P5b admin API (#541) |
 | ResetTuner | stubbed | intentional stub per D2 |
-| SetChannelMapping | stubbed | intentional stub per D2 |
+| SetChannelMapping | partial | Live TV P5b admin API (#541) |
 | UpdateSeriesTimer | stubbed | intentional stub per D2 |
 | UpdateTimer | stubbed | intentional stub per D2 |
 
@@ -655,11 +655,11 @@ These SDK conveniences are not counted in the REST parity fraction:
 | GetDefaultMetadataOptions | deferred | deferred: system configuration management not implemented |
 | GetEndpointInfo | partial | — |
 | GetLogEntries | partial | — |
-| GetLogFile | deferred | deferred: server log access not implemented |
+| GetLogFile | partial | — |
 | GetNamedConfiguration | partial | — |
 | GetPingSystem | partial | — |
 | GetPublicSystemInfo | partial | — |
-| GetServerLogs | deferred | deferred: server log access not implemented |
+| GetServerLogs | partial | — |
 | GetSystemInfo | partial | — |
 | GetSystemStorage | partial | — |
 | GetUtcTime | deferred | deferred: UTC time endpoint not implemented |
@@ -781,15 +781,15 @@ These SDK conveniences are not counted in the REST parity fraction:
 
 ## Deferred-stubbed cohort
 
-LiveTv (38 ops) and SyncPlay (22 ops) are registered as intentional stubs.
+LiveTv (21 ops) and SyncPlay (22 ops) are registered as intentional stubs.
 They use `status: stubbed` with `disposition: deferred` per decision D2.
 
 ## Input diagnostics
 
 - OpenAPI operations: 364
 - Shadow routes: 55
-- Route snapshot routes: 337
-- Native routes (excluded from parity): 2
+- Route snapshot routes: 345
+- Native routes (excluded from parity): 3
 - Duplicate operation IDs: 0
 - Unknown exported routes: 0
 - Unknown result operations: 0

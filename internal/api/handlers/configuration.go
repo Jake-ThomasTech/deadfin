@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/deadfin-org/deadfin/internal/api/bind"
+	"github.com/deadfin-org/deadfin/internal/api/middleware"
 	"github.com/deadfin-org/deadfin/internal/api/render"
 	"github.com/deadfin-org/deadfin/internal/api/router"
 	"github.com/deadfin-org/deadfin/internal/auth"
@@ -85,6 +86,13 @@ func (h configuration) getNamedConfiguration(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		renderProblem(w, r, http.StatusNotFound, "Named configuration not found.")
 		return
+	}
+	// Tuner and guide URLs carry provider credentials; only an administrator
+	// sees them unmasked (D-69).
+	if options, ok := value.(config.LiveTvOptions); ok {
+		if identity, _ := middleware.IdentityFromContext(r.Context()); !identity.Administrator {
+			value = options.Redacted()
+		}
 	}
 	_ = render.JSON(w, r, http.StatusOK, value)
 }

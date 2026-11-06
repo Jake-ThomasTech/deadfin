@@ -1,0 +1,44 @@
+{{- if eq .Values.mode "deployment" }}
+{{- $root := . }}
+{{- range $pool := .Values.pools }}
+{{- $name := printf "%s-%s" (include "deadfin-worker.fullname" $root) (required "each pool needs a name" $pool.name) | trunc 63 | trimSuffix "-" }}
+{{- $selector := dict "app.kubernetes.io/name" (include "deadfin-worker.name" $root) "app.kubernetes.io/instance" $root.Release.Name "app.kubernetes.io/component" "worker" "deadfin.org/pool" $pool.name }}
+{{- $worker := mergeOverwrite (deepCopy $root.Values.worker) (pick $pool "maxJobs" "hwType" "renderNode" "hwDecode" "hwSessions" "inputMode" "resources") }}
+{{- $keda := mergeOverwrite (deepCopy $root.Values.keda) ($pool.keda | default dict) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "deadfin-worker.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: worker
+    deadfin.org/pool: {{ $pool.name | quote }}
+spec:
+  {{- if not $keda.enabled }}
+  replicas: {{ $pool.replicas | default 1 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- toYaml $selector | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- toYaml $selector | nindent 8 }}
+        {{- with $root.Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $root.Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- $scheduling := dict "nodeSelector" ($pool.nodeSelector | default $root.Values.nodeSelector) "tolerations" ($pool.tolerations | default $root.Values.tolerations) "affinity" ($pool.affinity | default $root.Values.affinity) }}
+      {{- include "deadfin-worker.pod" (dict "root" $root "worker" $worker "pools" (list $pool.name) "ephemeral" true "scheduling" $scheduling) | nindent 6 }}
+{{- end }}
+{{- end }}

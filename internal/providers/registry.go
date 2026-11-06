@@ -43,6 +43,9 @@ type Registry struct {
 	// disabledImageFetchers returns the server MetadataOptions
 	// DisabledImageFetchers for an item type. Nil disables none.
 	disabledImageFetchers func(itemType string) []string
+	// imageListers are the remote image providers (IRemoteImageProvider)
+	// of the remote image stage, in default order.
+	imageListers []ImageLister
 }
 
 // NewRegistry constructs a registry in registration order within each stage.
@@ -65,6 +68,15 @@ func (r *Registry) WithLogger(logger *slog.Logger) *Registry {
 func (r *Registry) WithDisabledImageFetchers(disabled func(itemType string) []string) *Registry {
 	clone := *r
 	clone.disabledImageFetchers = disabled
+	return &clone
+}
+
+// WithImageListers returns a copy of the registry whose remote image stage
+// runs listers, as upstream ItemImageProvider.RefreshImages runs the
+// IRemoteImageProvider image fetchers.
+func (r *Registry) WithImageListers(listers ...ImageLister) *Registry {
+	clone := *r
+	clone.imageListers = append([]ImageLister(nil), listers...)
 	return &clone
 }
 
@@ -124,11 +136,17 @@ func (r *Registry) RefreshWithOutcome(ctx context.Context, refresh library.Refre
 	// The scanner sets SkipRemoteMetadata for a stored item that upstream
 	// GetProviders would not refresh: an unchanged item that was refreshed
 	// before. The scanner carries its stored metadata instead.
-	if !refresh.ReplaceAllMetadata && refresh.Mode <= library.RefreshModeValidationOnly || refresh.SkipRemoteMetadata {
-		return library.RefreshOutcome{}, nil
+	handled := make(map[string]bool)
+	failures := 0
+	if refresh.ReplaceAllMetadata || refresh.Mode > library.RefreshModeValidationOnly && !refresh.SkipRemoteMetadata {
+		var err error
+		failures, err = r.runStage(ctx, refresh, target, ProviderStageRemoteMetadata, false, handled)
+		if err != nil {
+			return library.RefreshOutcome{RemoteFailures: failures}, err
+		}
 	}
-	failures, err := r.run(ctx, refresh, target, ProviderStageRemoteMetadata, false)
-	return library.RefreshOutcome{RemoteFailures: failures}, err
+	imageFailures, err := r.refreshRemoteImages(ctx, refresh, target, handled)
+	return library.RefreshOutcome{RemoteFailures: failures + imageFailures}, err
 }
 
 // LocalMetadataChanged reports whether an enabled local metadata reader saw a
@@ -166,6 +184,12 @@ func (r *Registry) log() *slog.Logger {
 // run executes one stage. It returns the number of remote providers that
 // failed; any other provider error stops the stage.
 func (r *Registry) run(ctx context.Context, refresh library.RefreshContext, target *item.Item, stage ProviderStage, stopOnHandled bool) (int, error) {
+	return r.runStage(ctx, refresh, target, stage, stopOnHandled, nil)
+}
+
+// runStage is run that also records in handled the lowercased name of each
+// provider that handled target. handled may be nil.
+func (r *Registry) runStage(ctx context.Context, refresh library.RefreshContext, target *item.Item, stage ProviderStage, stopOnHandled bool, handled map[string]bool) (int, error) {
 	failures := 0
 	for _, provider := range r.ordered(stage, typeProviderSelection(refresh.Options, target.Kind, stage)) {
 		if err := ctx.Err(); err != nil {
@@ -191,7 +215,7 @@ func (r *Registry) run(ctx context.Context, refresh library.RefreshContext, targ
 		if stage != ProviderStageLocalImages {
 			locked = snapshotLockedMetadata(*target)
 		}
-		handled, err := provider.Refresh(ctx, refresh, target)
+		ok, err := provider.Refresh(ctx, refresh, target)
 		if imagesOff {
 			target.ImageInfos = images
 		}
@@ -219,9 +243,12 @@ func (r *Registry) run(ctx context.Context, refresh library.RefreshContext, targ
 				slog.String("provider", provider.Name()),
 				slog.String("item", target.ID.String()),
 				slog.String("kind", target.Kind.String()),
-				slog.Bool("handled", handled))
+				slog.Bool("handled", ok))
 		}
-		if stopOnHandled && handled {
+		if ok && handled != nil {
+			handled[strings.ToLower(provider.Name())] = true
+		}
+		if stopOnHandled && ok {
 			return failures, nil
 		}
 	}

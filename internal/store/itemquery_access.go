@@ -60,13 +60,21 @@ func (reader PlaybackItemAccessReader) AccessiblePlaybackItemIDs(ctx context.Con
 // This is divergence D-03's SQL replacement for upstream's post-query object
 // filtering, so inaccessible rows cannot consume a page slot or count.
 func applyItemQueryAccess(relation *itemQueryIDRelation, query ItemQuery) {
-	visible := itemQueryAccessClause(relation, query, "visible_item")
+	visible := itemQueryAccessClause(relation, query, "items")
 	if visible == "" {
 		return
 	}
 
 	source := relation.current
-	relation.add("visible_ids", "SELECT visible_item.id FROM items AS visible_item JOIN "+source+" AS selected ON selected.id = visible_item.id WHERE "+visible)
+	sql := "SELECT items.id FROM items JOIN " + source + " AS selected ON selected.id = items.id WHERE " + visible
+	if itemQuerySharedListsChannelOnly(query) {
+		relation.addMaterialized("visible_ids", sql)
+		return
+	}
+	if source == "filtered_ids" {
+		relation.access = visible
+	}
+	relation.add("visible_ids", sql)
 }
 
 // itemQueryAccessClause returns the target-user visibility predicate for one
@@ -92,7 +100,26 @@ func itemQueryAccessClause(relation *itemQueryIDRelation, query ItemQuery, alias
 		topParentFolders := itemQueryAccessUUIDList(relation, policy.EnabledFolders)
 		itemFolders := itemQueryAccessUUIDList(relation, policy.EnabledFolders)
 		ancestorFolders := itemQueryAccessUUIDList(relation, policy.EnabledFolders)
-		clauses = append(clauses, "("+alias+".kind = '"+playlistKind+"' OR ("+alias+".top_parent_id IN ("+topParentFolders+") OR "+alias+".id IN ("+itemFolders+") OR EXISTS (SELECT 1 FROM ancestors AS policy_ancestor WHERE policy_ancestor.item_id = "+alias+".id AND policy_ancestor.ancestor_id IN ("+ancestorFolders+")))"+itemQueryAccessByNameClause(query, alias)+")")
+		// Upstream Live TV reads pass the Live TV folder as explicit
+		// TopParentIds, so EnabledFolders never scopes them
+		// (LiveTvManager.GetInternalChannels, GetPrograms). EnableLiveTvAccess
+		// gates them instead; it defaults to true (UserPolicy).
+		liveTV := ""
+		if policy.EnableLiveTvAccess == nil || *policy.EnableLiveTvAccess {
+			liveTV = " OR " + alias + ".source_type = " + relation.argument(enum(item.SourceTypeLiveTV))
+		}
+		clauses = append(clauses, "("+alias+".kind = '"+playlistKind+"' OR ("+alias+".top_parent_id IN ("+topParentFolders+") OR "+alias+".id IN ("+itemFolders+") OR EXISTS (SELECT 1 FROM ancestors AS policy_ancestor WHERE policy_ancestor.item_id = "+alias+".id AND policy_ancestor.ancestor_id IN ("+ancestorFolders+")))"+liveTV+itemQueryAccessByNameClause(query, alias)+")")
+	}
+	// A user without Live TV access sees no Live TV item, also through a
+	// shared playlist or collection (D-95). Upstream scopes item queries to
+	// the user's views, which omit Live TV for that user
+	// (UserViewManager.cs:132), but checks only the parental rating on
+	// linked children (BaseItem.IsVisible).
+	if policy.EnableLiveTvAccess != nil && !*policy.EnableLiveTvAccess {
+		clauses = append(clauses, alias+".source_type <> "+relation.argument(enum(item.SourceTypeLiveTV)))
+	}
+	if policy.LimitLiveTvToSharedLists != nil && *policy.LimitLiveTvToSharedLists {
+		clauses = append(clauses, itemQueryAccessSharedListsClause(relation, query.User.ID, alias))
 	}
 	clauses = append(clauses, itemQueryAccessTagClause(relation, alias, policy.BlockedTags, true))
 	clauses = append(clauses, itemQueryAccessTagClause(relation, alias, policy.AllowedTags, false))
@@ -148,14 +175,17 @@ func itemQueryAccessClauseArguments(d Dialect, query ItemQuery, alias string, ar
 }
 
 type itemQueryUserPolicy struct {
-	IsAdministrator      bool
-	EnableAllFolders     *bool
-	EnabledFolders       []dto.UUID
-	BlockedTags          []string
-	AllowedTags          []string
-	MaxParentalRating    *int
-	MaxParentalSubRating *int
-	BlockUnratedItems    []int
+	IsAdministrator    bool
+	EnableAllFolders   *bool
+	EnabledFolders     []dto.UUID
+	EnableLiveTvAccess *bool
+	BlockedTags        []string
+	AllowedTags        []string
+	// LimitLiveTvToSharedLists is Deadfin-only (D-105).
+	LimitLiveTvToSharedLists *bool
+	MaxParentalRating        *int
+	MaxParentalSubRating     *int
+	BlockUnratedItems        []int
 }
 
 func itemQueryAccessUUIDList(relation *itemQueryIDRelation, values []dto.UUID) string {
@@ -167,6 +197,52 @@ func itemQueryAccessUUIDList(relation *itemQueryIDRelation, values []dto.UUID) s
 		placeholders[index] = relation.argument(uuidArgDialect(relation.d, value))
 	}
 	return strings.Join(placeholders, ", ")
+}
+
+// itemQueryAccessSharedListsClause admits a Live TV channel only when a
+// playlist that the user can see links it: a public playlist, the user's own,
+// or one shared with the user. A programme follows its channel. Other kinds
+// pass (D-105).
+//
+// The two kinds use different shapes because their row counts differ. A
+// channel looks up its own linked_children rows by child_item_id. Programmes
+// outnumber channels by an order of magnitude, so a programme tests its
+// channel against the set of listed channels, which the database builds once.
+func itemQueryAccessSharedListsClause(relation *itemQueryIDRelation, userID dto.UUID, alias string) string {
+	visibleList := func() string {
+		ownerID := relation.argument(uuidArgDialect(relation.d, userID))
+		shareID := relation.argument(uuidArgDialect(relation.d, userID))
+		return "channel_list.kind = '" + item.KindPlaylist.String() + "' AND (channel_list.open_access = " + relation.d.Boolean(true) +
+			" OR channel_list.playlist_owner_user_id = " + ownerID +
+			" OR EXISTS (SELECT 1 FROM item_shares AS channel_list_share WHERE channel_list_share.item_id = channel_list.id AND channel_list_share.user_id = " + shareID + "))"
+	}
+	const lists = "linked_children AS channel_list_entry JOIN items AS channel_list ON channel_list.id = channel_list_entry.parent_item_id"
+	channel := item.KindLiveTvChannel.String()
+	program := item.KindLiveTvProgram.String()
+	return "(" + alias + ".kind NOT IN ('" + channel + "', '" + program + "')" +
+		" OR (" + alias + ".kind = '" + channel + "' AND EXISTS (SELECT 1 FROM " + lists + " WHERE channel_list_entry.child_item_id = " + alias + ".id AND " + visibleList() + "))" +
+		" OR (" + alias + ".kind = '" + program + "' AND " + alias + ".channel_id IS NOT NULL AND " + alias + ".channel_id IN (SELECT channel_list_entry.child_item_id FROM " + lists + " WHERE " + visibleList() + ")))"
+}
+
+// itemQuerySharedListsChannelOnly reports whether query uses the D-105
+// shared-list filter and asks only for channels. Its visible set is small next
+// to the item table, but the planner cannot estimate the filter, so it would
+// walk the whole table in sort order; materializing the set lets the sort run
+// over the visible channels alone.
+func itemQuerySharedListsChannelOnly(query ItemQuery) bool {
+	if query.User == nil || len(query.IncludeItemTypes) == 0 {
+		return false
+	}
+	for _, kind := range query.IncludeItemTypes {
+		if kind != item.KindLiveTvChannel {
+			return false
+		}
+	}
+	policy := itemQueryUserPolicy{}
+	if len(query.User.Policy) == 0 || json.Unmarshal(query.User.Policy, &policy) != nil {
+		return false
+	}
+	return !policy.IsAdministrator && policy.LimitLiveTvToSharedLists != nil && *policy.LimitLiveTvToSharedLists
 }
 
 func itemQueryAccessTagClause(relation *itemQueryIDRelation, alias string, tags []string, exclude bool) string {

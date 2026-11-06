@@ -4,7 +4,11 @@ ARG SOURCE_DATE_EPOCH
 # deadfin-web, the default web client. The image index is pinned by digest;
 # Renovate opens a bump pull request for each deadfin-web release. Release
 # order: tag deadfin-web, merge the bump, then tag deadfin (docs/releases.md).
-ARG DEADFIN_WEB_IMAGE=ghcr.io/deadfin-org/deadfin-web:v0.3.0@sha256:59ce839b64704544451140726f5d7529b39db0fb5e426bc00273c87aa544fc35
+# v0.4 dev images pin a deadfin-web master build from the private Gitea
+# registry (git.srvlab.io/whiskey/deadfin-web:assets-<sha>). The build-image
+# jobs log in to git.srvlab.io before the build. Pin a public
+# ghcr.io/deadfin-org/deadfin-web release before a v0.4.0 tag.
+ARG DEADFIN_WEB_IMAGE=ghcr.io/deadfin-org/deadfin-web:v0.4.0-rc.1@sha256:4ed738526f59549b5daaa09d54b4838e6f6f9bd6d47bcf84d6337ddf735e4a15
 FROM --platform=$BUILDPLATFORM golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS build
 ARG TARGETOS
 ARG TARGETARCH
@@ -65,8 +69,9 @@ RUN --mount=type=cache,target=/root/.cache/deadfin-skiasharp \
     CGO_ENABLED=0 go run ./tools/skia-fetch -arch "$TARGETARCH" -cache /root/.cache/deadfin-skiasharp -o /out/libSkiaSharp.so
 
 # The deadfin-web release image holds the static bundle at /deadfin-web. The
-# files do not depend on the architecture.
-FROM --platform=$BUILDPLATFORM ${DEADFIN_WEB_IMAGE} AS deadfin-web
+# files do not depend on the architecture. The stage reads the amd64 image,
+# because master builds of deadfin-web publish only that platform.
+FROM --platform=linux/amd64 ${DEADFIN_WEB_IMAGE} AS deadfin-web
 
 FROM --platform=$TARGETPLATFORM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 ARG REVISION

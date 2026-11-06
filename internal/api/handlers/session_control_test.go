@@ -40,7 +40,7 @@ func TestSessionControlRoutesAuthorizeAndEmitJellyfinCommands(t *testing.T) {
 	}
 
 	sender := &capturingSessionSender{}
-	handlers.RegisterSessionControl(h.rt, sessioncontrol.New(h.sessions, h.users, sender))
+	handlers.RegisterSessionControl(h.rt, sessioncontrol.New(h.sessions, h.users, sender), nil)
 	itemID := p104UUID(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 
 	calls := []struct {

@@ -3,6 +3,7 @@
 package store_test
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -86,5 +87,71 @@ func TestTranslateItemQueryUsesBoxSetLibraryFolderRelation(t *testing.T) {
 				t.Fatalf("BoxSet count args = %#v, want kind and folder", translated.CountArgs)
 			}
 		})
+	}
+}
+
+// TestTranslateItemQueryReadsVisiblePageDirectly pins the direct page shape.
+// When visibility is the only transform, the page statement selects from items
+// with the filters and the visibility predicate inline, so the planner can walk
+// a start index in order and stop at the limit. Another transform keeps the
+// id relation.
+func TestTranslateItemQueryReadsVisiblePageDirectly(t *testing.T) {
+	viewer := groupingUUID(t, 603)
+	limit := 50
+	direct := store.ItemQuery{
+		User:             &store.User{ID: viewer, Policy: []byte(`{"LimitLiveTvToSharedLists":true}`)},
+		IncludeItemTypes: []item.Kind{item.KindLiveTvProgram},
+		Limit:            &limit,
+		OrderBy:          []store.ItemOrder{{SortBy: store.ItemSortByStartDate, SortOrder: store.SortOrderAscending}},
+	}
+	adjacent := direct
+	adjacentTo := groupingUUID(t, 604)
+	adjacent.AdjacentTo = &adjacentTo
+
+	for _, dialect := range groupingDialects() {
+		t.Run(dialect.name, func(t *testing.T) {
+			translated, err := store.Translate(direct, dialect.dialect)
+			if err != nil {
+				t.Fatalf("Translate: %v", err)
+			}
+			if !strings.HasPrefix(translated.SQL, "SELECT ") || strings.Contains(translated.SQL, "IN (SELECT id FROM") {
+				t.Fatalf("visible page SQL = %s\nwant a direct select from items", translated.SQL)
+			}
+			for _, fragment := range []string{"FROM items WHERE", "channel_list_entry", "ORDER BY"} {
+				if !strings.Contains(translated.SQL, fragment) {
+					t.Fatalf("visible page SQL = %s\nwant %q", translated.SQL, fragment)
+				}
+			}
+			if !strings.Contains(translated.CountSQL, "visible_ids") {
+				t.Fatalf("visible count SQL = %s\nwant the id relation", translated.CountSQL)
+			}
+			assertPlaceholderArgs(t, dialect.placeholder, translated.SQL, translated.Args)
+
+			translated, err = store.Translate(adjacent, dialect.dialect)
+			if err != nil {
+				t.Fatalf("Translate adjacent: %v", err)
+			}
+			if !strings.Contains(translated.SQL, "IN (SELECT id FROM") {
+				t.Fatalf("adjacent page SQL = %s\nwant the id relation", translated.SQL)
+			}
+		})
+	}
+}
+
+func assertPlaceholderArgs(t *testing.T, placeholder, sql string, args []any) {
+	t.Helper()
+	if placeholder == "?" {
+		if got := strings.Count(sql, "?"); got != len(args) {
+			t.Fatalf("SQL has %d placeholders, args = %d: %s", got, len(args), sql)
+		}
+		return
+	}
+	for index := range args {
+		if !strings.Contains(sql, "$"+strconv.Itoa(index+1)) {
+			t.Fatalf("SQL lacks $%d for %d args: %s", index+1, len(args), sql)
+		}
+	}
+	if strings.Contains(sql, "$"+strconv.Itoa(len(args)+1)) {
+		t.Fatalf("SQL uses $%d beyond %d args: %s", len(args)+1, len(args), sql)
 	}
 }

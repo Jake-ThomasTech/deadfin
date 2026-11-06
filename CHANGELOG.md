@@ -13,6 +13,113 @@ newest release or release candidate. `:latest` follows the newest release.
 
 ## [Unreleased]
 
+## [0.4.0-rc.1] - 2026-11-06
+
+First release candidate for v0.4.0. It adds Live TV, transcode workers,
+restart continuity, the stream edge and server replicas. The image bundles
+deadfin-web v0.4.0-rc.1 at `/web/`, with the transcode workers page and
+Live TV for viewers.
+
+### Added
+
+- Live TV (D20). An M3U tuner reads the channel playlist, and an XMLTV
+  listings provider fills the guide. The Refresh Guide task stores channels
+  and programmes as items, so the Jellyfin Live TV API, item queries and
+  search hints return them. Channels play through a shared stream broker:
+  viewers of one channel share one upstream connection, an HLS source is
+  read once through an ffmpeg remux, a dropped or stalled upstream
+  reconnects, and an expired channel URL is renewed with one playlist
+  re-read (D-87, D-88, D-93, D-103). An M3U tuner filters channels by
+  `group-title` (`IncludeGroups`, `ExcludeGroups`) and stores the group as
+  channel tags (D-90, D-91). The guide reads `SxxEyy` episode numbers and
+  the "New" marker from IPTV descriptions (D-123). Timer and series-timer
+  requests return 400 (D-122).
+- Live TV channel lists. Playlists and collections accept channels, so an
+  administrator can share curated channel lists (D-94). The user policy
+  field `LimitLiveTvToSharedLists` limits a user to the channels in lists
+  they can see (D-105). `EnableLiveTvAccess` hides every Live TV item from
+  a user without access (D-95).
+- Remote transcode workers (D-118). `deadfin worker` runs HLS and
+  progressive transcodes on another host, with its own GPU (QSV, VA-API or
+  NVENC). A worker dials out to the server and authenticates with a static
+  token (`DEADFIN_TRANSCODE_WORKER_TOKENS`) or an enrolled identity, over
+  TLS. A placement policy (`local`, `local-first`, `workers-first`,
+  `workers-only`) with pools and rules decides where each job runs, with a
+  local GPU and CPU fallback. Text subtitle burn-in runs on workers. A
+  worker that stops or disconnects hands its jobs to another host at the
+  next segment. Container image, packages, a Helm chart, KEDA scaling
+  signals and a scale hook are included. Plain HTTP for workers on a
+  trusted network is a dashboard setting or
+  `DEADFIN_TRANSCODE_WORKERS_ALLOW_HTTP`. See
+  [docs/transcode-workers.md](docs/transcode-workers.md).
+- Transcode workers: placement prefers the worker that decodes and encodes
+  the job in hardware, and in a mode other than `local` the HLS output
+  codec can be one that only a worker encodes, such as AV1 (D-125).
+- Playback continues through a server restart. With
+  `DEADFIN_PLAY_SESSION_RESTORE=true`, server replicas or the stream edge,
+  play sessions and their `PlaySessionId` grants persist across a restart.
+  A worker keeps its
+  jobs for the job lease (`DEADFIN_TRANSCODE_JOB_LEASE`, 60 s) so the next
+  server process adopts them.
+- Stream edge (D-119, D-120). `deadfin edge` serves HLS segments that workers
+  mirror to it, and direct-play streams from the library, while the server
+  restarts. It needs `DEADFIN_EDGE_KEY` on the server.
+- Server replicas on PostgreSQL (D-121). With `DEADFIN_REPLICA_URL`, two or
+  more server processes share one database. Each play session and transcode
+  job has one owner replica, other replicas forward its requests there, and
+  a replica that stops hands its sessions and jobs to a peer, so a rolling
+  update keeps playback. `GET /Sessions`, the dashboard's session list, remote-control
+  commands and WebSocket events (user data, library changes, refresh
+  progress, activity) span all replicas.
+
+### Changed
+
+- `GET /Search/Hints` is faster on large libraries. It matches anime titles
+  once per request, and an index covers the search scan.
+- Filtered and visible item pages read straight from the items table.
+
+### Fixed
+
+- An HLS seek no longer hangs when the restarted transcode takes more than
+  about 5 s to write its first segment, for example Intel QSV HEVC output
+  (#858). Before the first segment download, the throttler measures the
+  lead from the seek position, not from the start of the file, so it no
+  longer pauses ffmpeg before the requested segment is complete. 0.3.1 has
+  the same defect.
+- A progressive video transcode (`/Videos/{id}/stream.{mkv,ts,mp4}`), which
+  PlaybackInfo offers to a client with a `Protocol: http` transcoding
+  profile, now plays (#857). It encodes H.264 (libx264) and AAC when the
+  streams cannot be copied (D-126). Before, the route refused the URL with
+  400 or 501. 0.3.1 has the same defect.
+- An HLS transcode that burns in an embedded SubRip (or other non-ASS
+  text) subtitle reads the cached subtitle extraction, as Jellyfin does
+  (#860). Before, libass read the whole media file at every start and
+  seek: about 160 s per seek on a 32 GB remux. The first burn-in of a file
+  still extracts its subtitles once. 0.3.1 has the same defect.
+- Behind a reverse proxy listed in `KnownProxies`, the client address comes
+  from `X-Forwarded-For`, as in Jellyfin (#864, GitHub #24). Sessions, the
+  activity log, the local-network bitrate rules and the QuickConnect
+  per-address limit (D-55) see each client instead of the proxy. With
+  `KnownProxies` empty nothing changes. The first-run wizard still refuses
+  proxied requests without the setup link (D-53).
+- A box set's TMDb ID is always a TMDb collection ID (#846, GitHub #18). A
+  box set that has a member movie's TMDb ID gets its members'
+  `TmdbCollection` ID on the next library scan or metadata refresh, or
+  searches TMDb by name when they have none, and then gets its poster.
+  `import-jellyfin` replaces a different stored TMDb ID with the Jellyfin
+  collection ID (`collection.xml` `<TmdbId>`) (D-116).
+- A metadata refresh fills a missing image from the enabled remote image
+  fetchers, as upstream does (#847, GitHub #19). An album without a cover
+  gets the TheAudioDB cover on a single-item refresh with
+  `ImageRefreshMode=FullRefresh` and in the *Refresh Metadata* task when the
+  library's `ImageFetchers` enable TheAudioDB, also when its
+  `MetadataFetchers` do not. Before, only the metadata providers set images
+  (D-124).
+- HLS: a source that the probe could not size (an IPTV stream joined mid-GOP)
+  transcodes, and a video copy of it uses MPEG-TS segments, not fMP4
+  (D-106).
+- `GET /Playlists/{playlistId}/Items` honours `userId`.
+
 ## [0.3.1] - 2026-11-02
 
 ### Security
@@ -288,7 +395,8 @@ First release candidate for v0.3.0, the community alpha.
 - The SQLite query for folder played counts uses a faster plan on large
   libraries.
 
-[Unreleased]: https://github.com/deadfin-org/deadfin/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/deadfin-org/deadfin/compare/v0.4.0-rc.1...HEAD
+[0.4.0-rc.1]: https://github.com/deadfin-org/deadfin/compare/v0.3.1...v0.4.0-rc.1
 [0.3.1]: https://github.com/deadfin-org/deadfin/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/deadfin-org/deadfin/releases/tag/v0.3.0
 [0.3.0-rc.3]: https://github.com/deadfin-org/deadfin/releases/tag/v0.3.0-rc.3

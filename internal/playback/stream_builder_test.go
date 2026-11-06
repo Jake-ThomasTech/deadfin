@@ -1097,3 +1097,35 @@ func TestStreamBuilderCopyAudioSubtractsSourceBitrateFromTotal(t *testing.T) {
 		t.Errorf("VideoBitrate = %v, want %d (total %d - audio %d)", got.VideoBitrate, wantVideoBitrate, totalBitrate, sourceAudioBitrate)
 	}
 }
+
+// A source with UseMostCompatibleTranscodingProfile (an M3U tuner without
+// AllowFmp4TranscodingContainer) transcodes with a ts profile when the client
+// sends one, and with the client's other profiles when it sends none (D-89).
+func TestStreamBuilderMostCompatibleFallsBackWithoutTS(t *testing.T) {
+	mp4 := TranscodingProfile{Container: "mp4", Type: DlnaVideo, VideoCodec: "h264", AudioCodec: "aac", Protocol: StreamProtocolHLS, Context: ContextStreaming}
+	ts := mp4
+	ts.Container = "ts"
+	for _, tc := range []struct {
+		name     string
+		profiles []TranscodingProfile
+		want     string
+	}{
+		{"fmp4 only", []TranscodingProfile{mp4}, "mp4"},
+		{"ts offered", []TranscodingProfile{mp4, ts}, "ts"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options, source := streamBuilderOptions(t, "Chrome", "mp4-h264-aac-vtt-2600k")
+			source.UseMostCompatibleTranscodingProfile = true
+			options.MediaSources = []MediaSourceInfo{source}
+			options.EnableDirectPlay, options.EnableDirectStream = false, false
+			options.Profile.TranscodingProfiles = tc.profiles
+			got, err := NewStreamBuilder(noTranscoderSupport{}).GetOptimalVideoStream(&options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == nil || got.Container == nil || *got.Container != tc.want {
+				t.Fatalf("container = %v, want %s", got, tc.want)
+			}
+		})
+	}
+}

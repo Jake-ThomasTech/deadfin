@@ -6,15 +6,19 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/deadfin-org/deadfin/internal/clock"
 	"github.com/deadfin-org/deadfin/internal/dto"
 	"github.com/deadfin-org/deadfin/internal/encoding"
 	"github.com/deadfin-org/deadfin/internal/hls"
@@ -27,6 +31,11 @@ const (
 	hlsTSContentType       = "video/mp2t"
 	hlsMP4ContentType      = "video/mp4"
 )
+
+// ErrHLSRunnerLost reports an HLS family whose remote transcode host
+// vanished mid-stream (transcode workers, #614). Segment restarts the
+// family once at the requested index.
+var ErrHLSRunnerLost = errors.New("HLS transcode host lost")
 
 // HLSManager owns the process and file lifecycle for one HLS playlist family.
 // It is deliberately playback-owned so handlers do not depend on ffmpeg's
@@ -80,12 +89,15 @@ type HLSJobRequest struct {
 	ExternalSubtitleSource   string
 	ExternalSubtitleRevision string
 	OpenExternalSubtitle     func() (*sourcefile.Source, error)
-	PlaySessionID            string
-	DeviceID                 string
-	MediaSourceID            string
-	SourceRevision           string
-	OpenSource               func() (*sourcefile.Source, error)
-	SegmentLengthSeconds     int
+	// SubtitleFontsDir is the fontsdir of a text subtitle burn-in, so a
+	// transcode worker can receive the fonts (#624).
+	SubtitleFontsDir     string
+	PlaySessionID        string
+	DeviceID             string
+	MediaSourceID        string
+	SourceRevision       string
+	OpenSource           func() (*sourcefile.Source, error)
+	SegmentLengthSeconds int
 	// MaxForwardGap overrides the manager's forward reuse window, in
 	// segment indexes. Zero keeps 24/SegmentLengthSeconds.
 	MaxForwardGap int
@@ -96,6 +108,19 @@ type HLSJobRequest struct {
 	StartTimeTicks    int64
 	// TranscodingInfo is the session projection of this rendition.
 	TranscodingInfo *dto.TranscodingInfo
+	// Facts feed transcode-worker placement rules (#616).
+	Facts encoding.HLSPlacementFacts
+	// BuildArgs builds Args for the host that a transcode worker placement
+	// chose (#622). Nil runs Args on any host.
+	BuildArgs func(caps encoding.Capabilities, host encoding.HostHardware) ([]string, error)
+	// Handoff restarts the family at a segment index (#617).
+	Handoff func(ctx context.Context, index int) error
+	// Local keeps the job on the server: a Live TV input reads the server's
+	// loopback stream broker.
+	Local bool
+	// RemoteOnly marks a rendition whose output codec only a transcode
+	// worker encodes (#854). Args is built for that worker.
+	RemoteOnly bool
 }
 
 // HLSTrickplayMetadata describes one image-tile rendition advertised by a
@@ -131,10 +156,27 @@ type HLSServiceConfig struct {
 	// file.
 	Subtitles   *SubtitleService
 	Attachments *AttachmentService
+	// EdgeGrant, when set, returns the stream edge read grant for a family
+	// (#619). Main adds it to every segment URL, so the edge serves the
+	// segments while the server restarts. An empty grant adds nothing.
+	EdgeGrant func(itemID dto.UUID, playSessionID, playlistPath, segmentPattern string) string
+	// LiveTv resolves the sources of open Live TV streams named by
+	// LiveStreamId. Nil rejects live stream requests.
+	LiveTv LiveTvSources
+	// Clock times the live HLS startup trace. Nil uses the real clock.
+	Clock clock.Clock
+	// Logger records the live HLS startup trace. Nil uses slog.Default.
+	Logger *slog.Logger
 	// AudioStart finds an audio stream that starts late, which HLS then
 	// encodes with leading silence instead of copying (D-82). Nil copies.
 	AudioStart AudioStartProber
+	// RemoteEncoders, when set, adds the transcode workers to the output
+	// codec choice (#854).
+	RemoteEncoders HLSRemoteEncoders
 }
+
+// HLSEdgeGrantQuery is the segment URL query parameter of an edge grant.
+const HLSEdgeGrantQuery = "DeadfinEdge"
 
 // HLSRequest carries the stream-negotiated facts shared by all HLS endpoints.
 type HLSRequest struct {
@@ -183,23 +225,40 @@ type HLSService struct {
 	manager      HLSManager
 	subtitles    *SubtitleService
 	attachments  *AttachmentService
+	edgeGrant    func(dto.UUID, string, string, string) string
+	liveTv       LiveTvSources
+	traces       *liveTraces
 	audioStarts  *hlsAudioStarts
+	// remoteEncoders and codecPins are the fleet codec choice (#854).
+	remoteEncoders HLSRemoteEncoders
+	codecPins      *hlsCodecPins
 }
 
 // NewHLSService creates the handler-facing HLS service.
 func NewHLSService(config HLSServiceConfig) *HLSService {
+	if config.Clock == nil {
+		config.Clock = clock.NewReal()
+	}
+	if config.Logger == nil {
+		config.Logger = slog.Default()
+	}
 	return &HLSService{
-		sources:      config.Sources,
-		transcodeDir: config.TranscodeDir,
-		capabilities: config.Capabilities,
-		current:      config.CurrentCapabilities,
-		hardware:     config.Hardware,
-		keyframes:    config.Keyframes,
-		trickplays:   config.Trickplays,
-		manager:      config.Manager,
-		subtitles:    config.Subtitles,
-		attachments:  config.Attachments,
-		audioStarts:  &hlsAudioStarts{prober: config.AudioStart},
+		sources:        config.Sources,
+		transcodeDir:   config.TranscodeDir,
+		capabilities:   config.Capabilities,
+		current:        config.CurrentCapabilities,
+		hardware:       config.Hardware,
+		keyframes:      config.Keyframes,
+		trickplays:     config.Trickplays,
+		manager:        config.Manager,
+		subtitles:      config.Subtitles,
+		attachments:    config.Attachments,
+		edgeGrant:      config.EdgeGrant,
+		liveTv:         config.LiveTv,
+		traces:         newLiveTraces(config.Clock, config.Logger),
+		audioStarts:    &hlsAudioStarts{prober: config.AudioStart},
+		remoteEncoders: config.RemoteEncoders,
+		codecPins:      newHLSCodecPins(config.Clock, config.Logger),
 	}
 }
 
@@ -252,11 +311,21 @@ func (service *HLSService) Main(ctx context.Context, request HLSRequest) (HLSRes
 		return HLSResponse{}, fmt.Errorf("%w: HLS endpoint prefix is required", ErrProgressiveInvalid)
 	}
 
+	playlist, err := hls.CreateMainPlaylist(ctx, service.mainPlaylistRequest(prepared))
+	if err != nil {
+		return HLSResponse{}, fmt.Errorf("%w: build HLS media playlist: %v", ErrProgressiveUnsupported, err)
+	}
+	return prepared.playlistResponse(playlist)
+}
+
+// mainPlaylistRequest is the media playlist of a prepared request.
+func (service *HLSService) mainPlaylistRequest(prepared preparedHLS) hls.MainPlaylistRequest {
+	request := prepared.request
 	keyframes := service.keyframes
 	if request.AudioOnly {
 		keyframes = nil
 	}
-	playlist, err := hls.CreateMainPlaylist(ctx, hls.MainPlaylistRequest{
+	return hls.MainPlaylistRequest{
 		ItemID:                    request.ItemID,
 		MediaSourceID:             request.MediaSourceID,
 		FilePath:                  prepared.source.Path,
@@ -264,14 +333,73 @@ func (service *HLSService) Main(ctx context.Context, request HLSRequest) (HLSRes
 		RunTimeTicks:              int64PointerValue(prepared.source.RunTimeTicks),
 		SegmentContainer:          request.SegmentContainer,
 		EndpointPrefix:            request.EndpointPrefix,
-		Query:                     hlsQuery(hlsSegmentQuery(request.RawQuery)),
+		Query:                     service.edgeGrantQuery(prepared, hlsQuery(hlsSegmentQuery(request.RawQuery))),
 		IsRemuxVideo:              !request.AudioOnly && prepared.job.OutputVideoCodec == "copy",
 		Keyframes:                 keyframes,
-	})
-	if err != nil {
-		return HLSResponse{}, fmt.Errorf("%w: build HLS media playlist: %v", ErrProgressiveUnsupported, err)
 	}
-	return prepared.playlistResponse(playlist)
+}
+
+// edgeGrantQuery adds the edge read grant to a segment query.
+func (service *HLSService) edgeGrantQuery(prepared preparedHLS, query string) string {
+	if service.edgeGrant == nil {
+		return query
+	}
+	grant := service.edgeGrant(prepared.request.ItemID, prepared.request.PlaySessionID, prepared.outputPath, prepared.segment)
+	if grant == "" {
+		return query
+	}
+	if query == "" {
+		return "?" + HLSEdgeGrantQuery + "=" + url.QueryEscape(grant)
+	}
+	return query + "&" + HLSEdgeGrantQuery + "=" + url.QueryEscape(grant)
+}
+
+// handoff restarts a VOD family at a segment that no client asked for yet,
+// with the runtime and length its segment URL carries (#617). The manager
+// calls it when a transcode worker is lost or drains. index is a segment
+// file index; a keyframe-cut remux numbers its files by source GOP, so the
+// family restarts at the first GOP of the advertised segment that holds
+// file index (deadfin#629).
+func (service *HLSService) handoff(request HLSRequest) func(context.Context, int) error {
+	return func(ctx context.Context, index int) error {
+		request := request
+		request.SegmentIndex = index
+		prepared, err := service.prepareHLS(ctx, request, true)
+		if err != nil {
+			return err
+		}
+		restartAt := index
+		if plan := prepared.keyframePlan; plan != nil {
+			segment, ok := hlsKeyframeSegment(*plan, index)
+			if !ok {
+				return fmt.Errorf("%w: HLS segment file %d is outside the keyframe playlist", ErrProgressiveInvalid, index)
+			}
+			request.SegmentIndex, restartAt = segment, plan.Segments[segment].FirstKeyframe
+		}
+		start, length, err := hls.MainPlaylistSegment(ctx, service.mainPlaylistRequest(prepared), request.SegmentIndex)
+		if err != nil {
+			return err
+		}
+		request.RuntimeTicks, request.ActualSegmentLengthTicks, request.ActualSegmentLengthTicksSet = start, length, true
+		if prepared, err = service.prepareHLS(ctx, request, true); err != nil {
+			return err
+		}
+		jobRequest, err := service.managerRequest(prepared, false, true)
+		if err != nil {
+			return err
+		}
+		return service.manager.RestartHLSAt(ctx, jobRequest, restartAt)
+	}
+}
+
+// hlsKeyframeSegment returns the advertised segment whose GOPs include the
+// segment file keyframe.
+func hlsKeyframeSegment(plan hls.KeyframePlan, keyframe int) (int, bool) {
+	segment := sort.Search(len(plan.Segments), func(index int) bool { return plan.Segments[index].EndKeyframe > keyframe })
+	if segment == len(plan.Segments) || plan.Segments[segment].FirstKeyframe > keyframe {
+		return 0, false
+	}
+	return segment, true
 }
 
 // Live starts the playlist family, waits for manager-owned readiness, and
@@ -292,16 +420,57 @@ func (service *HLSService) Live(ctx context.Context, request HLSRequest) (HLSRes
 	if err != nil {
 		return HLSResponse{}, err
 	}
-	if err := service.manager.StartHLS(ctx, jobRequest); err != nil {
-		return HLSResponse{}, err
-	}
-	playlist, err := service.manager.WaitPlaylist(ctx, prepared.outputPath, request.MinSegments)
+	playlist, err := service.startLive(ctx, prepared, jobRequest)
 	if err != nil {
 		return HLSResponse{}, err
 	}
 	identity := hlsLiveIdentity(playlist, prepared.playlistID)
 	response.Body = io.NopCloser(strings.NewReader(hls.RewriteLivePlaylist(playlist, identity, request.SegmentContainer)))
 	return response, nil
+}
+
+// startLive starts or joins the playlist family and waits for its playlist.
+// The first fetch of an open live stream's playlist is traced step by step.
+func (service *HLSService) startLive(ctx context.Context, prepared preparedHLS, jobRequest HLSJobRequest) (string, error) {
+	request := prepared.request
+	if request.LiveStreamID == "" {
+		if err := service.manager.StartHLS(ctx, jobRequest); err != nil {
+			return "", err
+		}
+		return service.manager.WaitPlaylist(ctx, prepared.outputPath, request.MinSegments)
+	}
+	requested, first := service.traces.begin(prepared.outputPath, request)
+	if err := service.manager.StartHLS(ctx, jobRequest); err != nil {
+		return "", err
+	}
+	if !first {
+		playlist, err := service.manager.WaitPlaylist(ctx, prepared.outputPath, request.MinSegments)
+		if err == nil {
+			service.traces.poll(prepared.outputPath, requested, playlist)
+		}
+		return playlist, err
+	}
+	steps := liveStartupSteps{requested: requested, ffmpegStarted: service.traces.clock.Now()}
+	if request.MinSegments > 1 {
+		if _, err := service.manager.WaitPlaylist(ctx, prepared.outputPath, 1); err != nil {
+			return "", err
+		}
+		steps.firstSegment = service.traces.clock.Now()
+	}
+	playlist, err := service.manager.WaitPlaylist(ctx, prepared.outputPath, request.MinSegments)
+	if err != nil {
+		return "", err
+	}
+	steps.ready = service.traces.clock.Now()
+	if steps.firstSegment.IsZero() {
+		steps.firstSegment = steps.ready
+	}
+	var open LiveStartup
+	if source, ok := service.liveTv.(LiveStartupSource); ok {
+		open, _ = source.LiveStartup(request.LiveStreamID)
+	}
+	service.traces.startup(prepared.outputPath, request, open, steps, playlist)
+	return playlist, nil
 }
 
 // Segment starts or joins the playlist family, delegates seek/restart policy to
@@ -329,6 +498,11 @@ func (service *HLSService) Segment(ctx context.Context, request HLSRequest) (HLS
 		segment := plan.Segments[request.SegmentIndex]
 		first, end = segment.FirstKeyframe, segment.EndKeyframe
 	}
+	traced := request.Live && request.LiveStreamID != ""
+	var asked time.Time
+	if traced {
+		asked = service.traces.segment(prepared.outputPath, request.SegmentIndex)
+	}
 	if err := service.manager.RestartHLSAt(ctx, jobRequest, first); err != nil {
 		return HLSResponse{}, err
 	}
@@ -340,8 +514,20 @@ func (service *HLSService) Segment(ctx context.Context, request HLSRequest) (HLS
 		}
 	}
 	body, err := service.waitSegmentFiles(ctx, prepared.outputPath, first, end, timing)
+	if errors.Is(err, ErrHLSRunnerLost) {
+		// A remote transcode host vanished before this segment completed.
+		// Restart the family at this segment once, on another host or
+		// locally, through the ordinary seek path.
+		if err := service.manager.RestartHLSAt(ctx, jobRequest, first); err != nil {
+			return HLSResponse{}, err
+		}
+		body, err = service.waitSegmentFiles(ctx, prepared.outputPath, first, end, timing)
+	}
 	if err != nil {
 		return HLSResponse{}, err
+	}
+	if traced {
+		service.traces.segmentServed(prepared.outputPath, request.SegmentIndex, asked)
 	}
 	service.manager.PingPlaySession(request.PlaySessionID)
 	response.Body = body
@@ -507,13 +693,16 @@ func hlsLegacyContentType(container string) string {
 }
 
 type preparedHLS struct {
-	request                  HLSRequest
-	source                   MediaSourceInfo
-	video                    *MediaStream
-	audio                    *MediaStream
-	job                      encoding.HLSJob
-	capabilities             encoding.Capabilities
-	args                     []string
+	request      HLSRequest
+	source       MediaSourceInfo
+	video        *MediaStream
+	audio        *MediaStream
+	job          encoding.HLSJob
+	capabilities encoding.Capabilities
+	args         []string
+	// codec is the output codec choice; a worker encoder makes the
+	// rendition remote-only (#854).
+	codec                    hlsCodecChoice
 	sourceRevision           string
 	externalSubtitleRevision string
 	openExternalSubtitle     func() (*sourcefile.Source, error)
@@ -543,6 +732,42 @@ func hlsRenditionOutputPath(transcodeDir, playSessionID, deviceID, sourceRevisio
 	return filepath.Join(transcodeDir, images.MD5GUID(string(key))+".m3u8")
 }
 
+// hlsSource resolves the media source: the persisted file source, or the
+// source of the open Live TV stream named by LiveStreamId
+// (MediaSourceManager.GetLiveStreamWithDirectStreamProvider).
+func (service *HLSService) hlsSource(ctx context.Context, request HLSRequest) (MediaSourceInfo, error) {
+	if request.LiveStreamID == "" {
+		source, err := service.sources.StaticSource(ctx, request.UserID, request.ItemID, request.MediaSourceID)
+		if err != nil {
+			return MediaSourceInfo{}, err
+		}
+		if !hasCanonicalSourceAuthority(source) {
+			return MediaSourceInfo{}, fmt.Errorf("%w: media source has incomplete canonical file authority", ErrProgressiveUnsupported)
+		}
+		return source, nil
+	}
+	if service.liveTv == nil {
+		return MediaSourceInfo{}, ErrProgressiveUnsupported
+	}
+	source, ok := service.liveTv.LiveStream(ctx, request.LiveStreamID)
+	if !ok {
+		return MediaSourceInfo{}, fmt.Errorf("%w: live stream is not open", ErrItemNotFound)
+	}
+	return source, nil
+}
+
+// hlsLiveInput is the encoder input of an open live stream: its broker
+// URL and the input facts GetInputModifier reads from the media source.
+func hlsLiveInput(source MediaSourceInfo) *encoding.LiveInput {
+	return &encoding.LiveInput{
+		URL:                   source.Path,
+		AnalyzeDurationMs:     intPointerValue(source.AnalyzeDurationMs),
+		IgnoreDts:             source.IgnoreDts,
+		ReadAtNativeFramerate: source.ReadAtNativeFramerate,
+		Loop:                  source.RequiresLooping,
+	}
+}
+
 func (service *HLSService) prepare(ctx context.Context, request HLSRequest) (preparedHLS, error) {
 	return service.prepareHLS(ctx, request, false)
 }
@@ -559,12 +784,9 @@ func (service *HLSService) prepareHLS(ctx context.Context, request HLSRequest, k
 		return preparedHLS{}, fmt.Errorf("%w: incomplete HLS service configuration", ErrProgressiveBackend)
 	}
 
-	source, err := service.sources.StaticSource(ctx, request.UserID, request.ItemID, request.MediaSourceID)
+	source, err := service.hlsSource(ctx, request)
 	if err != nil {
 		return preparedHLS{}, err
-	}
-	if !hasCanonicalSourceAuthority(source) {
-		return preparedHLS{}, fmt.Errorf("%w: media source has incomplete canonical file authority", ErrProgressiveUnsupported)
 	}
 	if source.ID != "" {
 		request.MediaSourceID = source.ID
@@ -582,11 +804,13 @@ func (service *HLSService) prepareHLS(ctx context.Context, request HLSRequest, k
 	}
 	capabilities := service.currentCapabilities()
 	request = resolvedHLSRequest(request, source, video, capabilities)
+	request = sizelessFMP4Copy(request, source, video, capabilities)
 	var hardware encoding.HardwareOptions
 	if service.hardware != nil && !request.AudioOnly {
 		hardware = service.hardware()
 	}
-	videoCodec := hlsTranscodeVideoCodec(request.VideoCodecs, capabilities, hardware)
+	codecChoice := service.hlsVideoCodec(source, video, audio, request, capabilities, hardware)
+	videoCodec := codecChoice.codec
 	if err := validateHLSTargetCodecs(source, video, audio, request, videoCodec, capabilities); err != nil {
 		return preparedHLS{}, err
 	}
@@ -597,8 +821,20 @@ func (service *HLSService) prepareHLS(ctx context.Context, request HLSRequest, k
 			return preparedHLS{}, err
 		}
 	}
-
 	job := hlsEncodingJob(source, video, audio, subtitle, hlsRenditionIdentityOutputPath, request, videoCodec, capabilities)
+	if codecChoice.encoder != nil && encoding.HLSEmbeddedSubtitleFilterSource(job) != "" {
+		// An embedded text subtitle burn-in stays on the server (#854):
+		// choose from the server's capabilities only.
+		codecChoice = hlsCodecChoice{codec: hlsTranscodeVideoCodec(request.VideoCodecs, capabilities, hardware)}
+		if err := validateHLSTargetCodecs(source, video, audio, request, codecChoice.codec, capabilities); err != nil {
+			return preparedHLS{}, err
+		}
+		job = hlsEncodingJob(source, video, audio, subtitle, hlsRenditionIdentityOutputPath, request, codecChoice.codec, capabilities)
+	}
+	if request.LiveStreamID != "" {
+		job.InputPath = ""
+		job.LiveInput = hlsLiveInput(source)
+	}
 	job.Hardware = hardware
 	service.padLateAudio(ctx, source, audio, request, &job)
 	service.useSubtitleCaches(ctx, source, subtitle, &job)
@@ -612,7 +848,7 @@ func (service *HLSService) prepareHLS(ctx context.Context, request HLSRequest, k
 		keyframePlan = service.remuxKeyframePlan(ctx, request, source, job)
 		job.KeyframeCuts = keyframePlan != nil
 	}
-	identityArgs, err := encoding.BuildHLSArgs(job, capabilities)
+	identityArgs, err := encoding.BuildHLSArgs(codecChoice.argsFor(job, capabilities))
 	if err != nil {
 		return preparedHLS{}, fmt.Errorf("%w: build HLS rendition identity: %v", ErrProgressiveUnsupported, err)
 	}
@@ -625,12 +861,12 @@ func (service *HLSService) prepareHLS(ctx context.Context, request HLSRequest, k
 	playlistID := strings.TrimSuffix(filepath.Base(outputPath), ".m3u8")
 	segment := strings.TrimSuffix(outputPath, ".m3u8") + "%d" + hlsSegmentExtension(request.SegmentContainer)
 	job.OutputPath = outputPath
-	args, err := encoding.BuildHLSArgs(job, capabilities)
+	args, err := encoding.BuildHLSArgs(codecChoice.argsFor(job, capabilities))
 	if err != nil {
 		return preparedHLS{}, fmt.Errorf("%w: build HLS job: %v", ErrProgressiveUnsupported, err)
 	}
 	return preparedHLS{
-		request: request, source: source, video: video, audio: audio, job: job, capabilities: capabilities, args: args,
+		request: request, source: source, video: video, audio: audio, job: job, capabilities: capabilities, args: args, codec: codecChoice,
 		sourceRevision: sourceRevision, externalSubtitleRevision: externalSubtitleRevision,
 		openExternalSubtitle: openExternalSubtitle, outputPath: outputPath, playlistID: playlistID, segment: segment,
 		keyframePlan: keyframePlan,
@@ -669,7 +905,10 @@ func (service *HLSService) useSubtitleCaches(ctx context.Context, source MediaSo
 	if stream == nil || job.SubtitleStream == nil || encoding.HLSSubtitleFilterSource(*job) == "" {
 		return
 	}
-	if !stream.IsExternal && rawExtractedSubtitle(*stream) && service.subtitles != nil && service.attachments != nil {
+	// SubtitleEncoder.GetSubtitleFilePath: every embedded text stream burns
+	// from its extraction, SubRip too. libass reading the media file demuxes
+	// all of it at every start and seek (#860).
+	if !stream.IsExternal && extractedEmbeddedSubtitle(*stream) && service.subtitles != nil && service.attachments != nil {
 		path, err := service.subtitles.extractedFile(ctx, source, *stream)
 		if err != nil {
 			return
@@ -787,7 +1026,12 @@ func hlsAudioSourceStream(source MediaSourceInfo, request HLSRequest) (*MediaStr
 
 func validateHLSSource(source MediaSourceInfo, request HLSRequest) error {
 	if request.LiveStreamID != "" {
-		return ErrProgressiveUnsupported
+		// An open live stream is read from its broker URL; the encoder
+		// validates the URL (encoding.LiveInput).
+		if source.LiveStreamID == "" || source.Protocol != MediaProtocolHTTP {
+			return ErrProgressiveUnsupported
+		}
+		return nil
 	}
 	if !safeProgressiveSourcePath(source.Path) {
 		return fmt.Errorf("%w: source path is not a safe local path", ErrProgressiveInvalid)
@@ -844,6 +1088,30 @@ func validateHLSRequest(request HLSRequest) error {
 	return nil
 }
 
+// sizelessFMP4Copy keeps a copy of a source the probe could not size out of
+// fMP4 (D-106). An fMP4 track header carries the frame size and is written
+// before the first frame, so the mp4 muxer refuses such a copy ("dimensions
+// not set"); a transcode is sized by its encoder. An H.264 copy moves to
+// mpegts segments, which carry no size and which every HLS client plays.
+// Apple HLS plays HEVC only in fMP4 segments, so another codec transcodes
+// instead of changing the container.
+func sizelessFMP4Copy(request HLSRequest, source MediaSourceInfo, video *MediaStream, caps encoding.Capabilities) HLSRequest {
+	if request.SegmentContainer != "fmp4" || request.AudioOnly || video == nil || hlsVideoSized(video) ||
+		!canCopyHLSVideo(source, video, request.ProgressiveRequest, caps) {
+		return request
+	}
+	if strings.EqualFold(video.Codec, "h264") {
+		request.SegmentContainer = "ts"
+	} else {
+		request.AllowVideoStreamCopy = false
+	}
+	return request
+}
+
+func hlsVideoSized(video *MediaStream) bool {
+	return video.Width != nil && *video.Width > 0 && video.Height != nil && *video.Height > 0
+}
+
 func resolvedHLSRequest(request HLSRequest, source MediaSourceInfo, video *MediaStream, caps encoding.Capabilities) HLSRequest {
 	if request.SegmentContainer == "" {
 		request.SegmentContainer = "ts"
@@ -890,7 +1158,8 @@ func hlsSegmentQuery(rawQuery string) string {
 			kept = append(kept, part)
 			continue
 		}
-		if strings.EqualFold(decodedKey, "runtimeTicks") || strings.EqualFold(decodedKey, "actualSegmentLengthTicks") {
+		// The server issues the edge grant (#619); a stale one is replaced.
+		if strings.EqualFold(decodedKey, "runtimeTicks") || strings.EqualFold(decodedKey, "actualSegmentLengthTicks") || strings.EqualFold(decodedKey, HLSEdgeGrantQuery) {
 			continue
 		}
 		kept = append(kept, part)
@@ -1008,6 +1277,12 @@ func hlsEncodingJob(source MediaSourceInfo, video, audio, subtitle *MediaStream,
 		// The pinned caller computes the bitrate before the stream-copy
 		// decision, with the requested codec (StreamingHelpers.cs:208-211).
 		job.OutputVideoBitrate = hlsOutputVideoBitrate(video, request.ProgressiveRequest, job.OutputVideoCodec)
+		if job.OutputVideoBitrate == 0 {
+			// Neither the request nor the source named a bitrate. The
+			// tuner's fallback is what a client without a bitrate is
+			// meant to use; without it the encoder runs on CRF alone.
+			job.OutputVideoBitrate = intPointerValue(source.FallbackMaxStreamingBitrate)
+		}
 		if canCopyHLSVideo(source, video, request.ProgressiveRequest, caps) {
 			job.OutputVideoCodec = "copy"
 		}
@@ -1314,6 +1589,18 @@ func hlsTranscodeVideoCodec(codecs []string, caps encoding.Capabilities, options
 	if len(codecs) == 0 {
 		return "h264"
 	}
+	for _, codec := range hlsVideoCodecOrder(codecs, options) {
+		if encoding.CanEncodeVideo(codec, caps, options) {
+			return codec
+		}
+	}
+	return ""
+}
+
+// hlsVideoCodecOrder is the order in which hlsTranscodeVideoCodec tries
+// the requested codecs: the encodable ones, with HEVC and AV1 last unless
+// encoding.xml allows them.
+func hlsVideoCodecOrder(codecs []string, options encoding.HardwareOptions) []string {
 	shifted := make([]string, 0, len(codecs))
 	var deferred []string
 	for _, codec := range codecs {
@@ -1327,15 +1614,14 @@ func hlsTranscodeVideoCodec(codecs []string, caps encoding.Capabilities, options
 		}
 		shifted = append(shifted, codec)
 	}
+	ordered := shifted[:0:0]
 	for _, codec := range append(shifted, deferred...) {
 		switch codec {
 		case "h264", "hevc", "av1":
-			if encoding.CanEncodeVideo(codec, caps, options) {
-				return codec
-			}
+			ordered = append(ordered, codec)
 		}
 	}
-	return ""
+	return ordered
 }
 
 // hlsHardwareOutputConstraints returns the HEVC or AV1 profile and level
@@ -1458,7 +1744,7 @@ func (service *HLSService) managerRequest(prepared preparedHLS, live, seekSegmen
 	if plan := prepared.keyframePlan; plan != nil {
 		segmentStartTicks = plan.KeyframeTicks
 	}
-	args, err := encoding.BuildHLSArgs(job, prepared.capabilities)
+	args, err := encoding.BuildHLSArgs(prepared.codec.argsFor(job, prepared.capabilities))
 	if err != nil {
 		return HLSJobRequest{}, fmt.Errorf("%w: build HLS manager job: %v", ErrProgressiveUnsupported, err)
 	}
@@ -1470,6 +1756,17 @@ func (service *HLSService) managerRequest(prepared preparedHLS, live, seekSegmen
 		ChangedAt:  facts.ChangedAt,
 	}
 	sourcePath := prepared.source.Path
+	openSource := func() (*sourcefile.Source, error) {
+		return sourcefile.Open(sourcePath, expected)
+	}
+	if job.LiveInput != nil {
+		// A live stream has no file to pin; the broker owns its lifetime.
+		openSource = nil
+	}
+	var handoff func(context.Context, int) error
+	if !live && seekSegment {
+		handoff = service.handoff(prepared.request)
+	}
 	return HLSJobRequest{
 		PlaylistPath:             prepared.outputPath,
 		Live:                     live,
@@ -1481,20 +1778,48 @@ func (service *HLSService) managerRequest(prepared preparedHLS, live, seekSegmen
 		ExternalSubtitleSource:   hlsExternalSubtitleFilterSource(job),
 		ExternalSubtitleRevision: prepared.externalSubtitleRevision,
 		OpenExternalSubtitle:     prepared.openExternalSubtitle,
+		SubtitleFontsDir:         hlsSubtitleFontsDir(job),
 		PlaySessionID:            prepared.request.PlaySessionID,
 		DeviceID:                 prepared.request.DeviceID,
 		MediaSourceID:            prepared.request.MediaSourceID,
 		SourceRevision:           prepared.sourceRevision,
-		OpenSource: func() (*sourcefile.Source, error) {
-			return sourcefile.Open(sourcePath, expected)
-		},
-		SegmentLengthSeconds: prepared.request.SegmentLengthSeconds,
-		MaxForwardGap:        maxForwardGap,
-		SegmentStartTicks:    segmentStartTicks,
-		RunTimeTicks:         int64PointerValue(prepared.source.RunTimeTicks),
-		StartTimeTicks:       startTimeTicks,
-		TranscodingInfo:      hlsTranscodingInfo(prepared, job.EncodingJob),
+		OpenSource:               openSource,
+		SegmentLengthSeconds:     prepared.request.SegmentLengthSeconds,
+		MaxForwardGap:            maxForwardGap,
+		SegmentStartTicks:        segmentStartTicks,
+		RunTimeTicks:             int64PointerValue(prepared.source.RunTimeTicks),
+		StartTimeTicks:           startTimeTicks,
+		TranscodingInfo:          hlsTranscodingInfo(prepared, job.EncodingJob),
+		Facts:                    encoding.PlacementFacts(job, prepared.capabilities),
+		BuildArgs:                hlsWorkerArgs(job),
+		Handoff:                  handoff,
+		Local:                    job.LiveInput != nil,
+		RemoteOnly:               prepared.codec.encoder != nil,
 	}, nil
+}
+
+// hlsWorkerArgs builds the argv of a video transcode for the host that a
+// transcode worker placement chose (#622): the worker's encoding
+// capabilities and hardware family, with the server's other encoding
+// options. The output operands stay those of job. A remux or an audio-only
+// job runs the server's argv.
+func hlsWorkerArgs(job encoding.HLSJob) func(encoding.Capabilities, encoding.HostHardware) ([]string, error) {
+	if job.OutputVideoCodec == "" || job.OutputVideoCodec == "copy" {
+		return nil
+	}
+	return func(caps encoding.Capabilities, host encoding.HostHardware) ([]string, error) {
+		worker := job
+		worker.Hardware = job.Hardware.ForHost(host)
+		return encoding.BuildHLSArgs(worker, caps)
+	}
+}
+
+// hlsSubtitleFontsDir is the fontsdir of a text subtitle burn-in.
+func hlsSubtitleFontsDir(job encoding.HLSJob) string {
+	if encoding.HLSSubtitleFilterSource(job) == "" {
+		return ""
+	}
+	return job.SubtitleStream.FontsDir
 }
 
 // hlsTranscodingInfo is the TranscodingInfo upstream
@@ -1629,7 +1954,7 @@ func (prepared preparedHLS) masterVariant() hls.MasterVariant {
 		audioProfile = stringPointerValue(prepared.audio.Profile)
 	}
 	variant := hls.MasterVariant{
-		URI:          hlsMainURI(prepared.request.RawQuery),
+		URI:          hlsVariantURI(prepared),
 		Audio:        hls.MasterAudio{Codec: hlsMasterAudioCodec(prepared.job.OutputAudioCodec, audioCodec(prepared.audio)), Profile: audioProfile},
 		AudioBitrate: prepared.job.OutputAudioBitrate,
 	}
@@ -1662,6 +1987,11 @@ func (prepared preparedHLS) masterVariant() hls.MasterVariant {
 	variant.VideoBitrate = prepared.job.OutputVideoBitrate
 	variant.Width = prepared.job.OutputWidth
 	variant.Height = prepared.job.OutputHeight
+	if variant.Width <= 0 || variant.Height <= 0 {
+		// RESOLUTION is written only when both output dimensions are
+		// known (DynamicHlsHelper.AppendPlaylistResolutionField).
+		variant.Width, variant.Height = 0, 0
+	}
 	if prepared.job.OutputFrameRate > 0 {
 		variant.FrameRate = prepared.job.OutputFrameRate
 	} else {
@@ -1706,6 +2036,16 @@ func boolPointerValue(value *bool) bool {
 }
 
 func hlsMainURI(rawQuery string) string { return "main.m3u8" + hlsQuery(rawQuery) }
+
+// hlsVariantURI is the master playlist's media playlist: live.m3u8 for an
+// open live stream, which has no run time (DynamicHlsHelper.cs:150,188,
+// IsSegmentedLiveStream), else main.m3u8.
+func hlsVariantURI(prepared preparedHLS) string {
+	if prepared.request.LiveStreamID != "" && prepared.source.RunTimeTicks == nil {
+		return "live.m3u8" + hlsQuery(prepared.request.RawQuery)
+	}
+	return hlsMainURI(prepared.request.RawQuery)
+}
 
 func hlsQuery(rawQuery string) string {
 	if rawQuery == "" || rawQuery[0] == '?' {

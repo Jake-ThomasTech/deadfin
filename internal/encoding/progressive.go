@@ -27,7 +27,9 @@ var subtitleFilterPathEscaper = strings.NewReplacer(
 // EncodingJob contains the media facts needed to build a progressive ffmpeg invocation.
 // It deliberately contains no request, filesystem, or process state.
 type EncodingJob struct {
-	InputPath       string
+	InputPath string
+	// LiveInput replaces InputPath with a live network input (Live TV).
+	LiveInput       *LiveInput
 	InputContainer  string
 	OutputPath      string
 	OutputContainer string
@@ -186,7 +188,7 @@ func validateVideoJob(job EncodingJob, caps Capabilities, hardware bool) error {
 	if err := validateEncodingInput(job); err != nil {
 		return err
 	}
-	if job.OutputContainer != "ts" && job.OutputContainer != "mp4" && job.OutputContainer != "fmp4" {
+	if job.OutputContainer != "ts" && job.OutputContainer != "mp4" && job.OutputContainer != "fmp4" && (hardware || job.OutputContainer != "mkv") {
 		return fmt.Errorf("unsupported progressive output container %q", job.OutputContainer)
 	}
 	if job.VideoStream.Index < 0 || job.AudioStream.Index < 0 {
@@ -206,8 +208,10 @@ func validateVideoJob(job EncodingJob, caps Capabilities, hardware bool) error {
 		if err := validateTranscodeDimensions(job.OutputWidth, job.OutputHeight); err != nil {
 			return err
 		}
-		if job.OutputVideoBitrate <= 0 || job.OutputVideoBitrate > int(^uint(0)>>1)/2 {
-			return fmt.Errorf("video transcode requires a positive non-overflowing bitrate")
+		// A live request may carry no bitrate and the source may have no
+		// probed rate; the encoder then runs on CRF alone.
+		if job.OutputVideoBitrate < 0 || job.OutputVideoBitrate > int(^uint(0)>>1)/2 {
+			return fmt.Errorf("video transcode requires a non-negative non-overflowing bitrate")
 		}
 		if isHDRRange(videoRangeType(job.VideoStream)) && !CanTonemap(job.VideoStream, caps, job.Hardware) {
 			return fmt.Errorf("HDR tone mapping requires 10-bit input and tonemapx or hardware tone mapping support")
@@ -236,18 +240,32 @@ func supportedVideoEncoder(job EncodingJob, caps Capabilities, hardware bool) bo
 	return false
 }
 
+// validateTranscodeDimensions checks output dimensions. A zero dimension is
+// unknown, not invalid: a live source that probed without width or height
+// encodes at the source size (GetSwScaleFilter returns no filter when neither
+// is requested, EncodingHelper.cs:3566-3572).
 func validateTranscodeDimensions(width, height int) error {
-	if width <= 0 || height <= 0 {
-		return fmt.Errorf("video transcode requires positive dimensions")
+	if width < 0 || height < 0 {
+		return fmt.Errorf("video transcode dimensions must not be negative")
 	}
-	if width > maxTranscodeDimension || height > maxTranscodeDimension || width > maxTranscodePixels/height {
+	if width > maxTranscodeDimension || height > maxTranscodeDimension {
+		return fmt.Errorf("video transcode dimensions exceed 8192 pixels per axis or 33554432 pixels total")
+	}
+	if width > 0 && height > 0 && width > maxTranscodePixels/height {
 		return fmt.Errorf("video transcode dimensions exceed 8192 pixels per axis or 33554432 pixels total")
 	}
 	return nil
 }
 
 func validateEncodingInput(job EncodingJob) error {
-	if !safePath(job.InputPath) || !safePath(job.OutputPath) {
+	if job.LiveInput != nil {
+		if err := validateLiveInput(*job.LiveInput); err != nil {
+			return err
+		}
+		if !safePath(job.OutputPath) {
+			return fmt.Errorf("encoding paths must be non-empty local paths without control characters or leading dashes")
+		}
+	} else if !safePath(job.InputPath) || !safePath(job.OutputPath) {
 		return fmt.Errorf("encoding paths must be non-empty local paths without control characters or leading dashes")
 	}
 	if !safeContainer(job.InputContainer) {
@@ -341,13 +359,11 @@ func appendVideoArgs(args []string, job EncodingJob, caps Capabilities) []string
 	if job.CopyTimestamps {
 		args = appendTimestampArgs(args, true)
 	}
-	return append(args,
-		"-preset", job.VideoQuality.Preset,
-		"-crf", strconv.Itoa(job.VideoQuality.CRF),
-		"-maxrate", strconv.Itoa(job.OutputVideoBitrate),
-		"-bufsize", strconv.Itoa(job.OutputVideoBitrate*2),
-		"-x264opts:0", job.VideoQuality.X264Options,
-	)
+	args = append(args, "-preset", job.VideoQuality.Preset, "-crf", strconv.Itoa(job.VideoQuality.CRF))
+	if job.OutputVideoBitrate > 0 {
+		args = append(args, "-maxrate", strconv.Itoa(job.OutputVideoBitrate), "-bufsize", strconv.Itoa(job.OutputVideoBitrate*2))
+	}
+	return append(args, "-x264opts:0", job.VideoQuality.X264Options)
 }
 
 func appendFilterArgs(args []string, job EncodingJob, caps Capabilities) []string {
@@ -366,18 +382,24 @@ func progressiveVideoFilter(job EncodingJob, caps Capabilities) string {
 		filter += ",format=yuv420p"
 	}
 	if job.SubtitleStream != nil && job.SubtitleStream.BurnIn && !isPGSSubtitle(job.SubtitleStream) {
-		filter += "," + subtitleFilterFileSource(job.SubtitleStream.Path) + ",setpts=PTS -" + formatRoundedSeconds(job.StartOffsetTicks) + "/TB"
+		filter += "," + subtitleFilterFileSource(subtitleSourcePath(job)) + ",setpts=PTS -" + formatRoundedSeconds(job.StartOffsetTicks) + "/TB"
 	}
 	return filter
 }
 
 func embeddedBitmapOverlayFilter(job EncodingJob, videoFilter string) string {
-	width := strconv.Itoa(job.OutputWidth)
-	height := strconv.Itoa(job.OutputHeight)
 	subtitle := strconv.Itoa(job.SubtitleStream.Index)
 	subtitleInput := strconv.Itoa(job.SubtitleStream.InputIndex)
 	video := strconv.Itoa(job.VideoStream.Index)
-	return "[" + subtitleInput + ":" + subtitle + "]scale,scale=-1:" + height + ":fast_bilinear,crop,pad=max(" + width + "\\,iw):max(" + height + "\\,ih):(ow-iw)/2:(oh-ih)/2:black@0,crop=" + width + ":" + height + "[sub];[0:" + video + "]" + videoFilter + "[main];[main][sub]overlay=eof_action=pass:repeatlast=0"
+	source := "[" + subtitleInput + ":" + subtitle + "]"
+	if job.OutputWidth <= 0 || job.OutputHeight <= 0 {
+		// Without an output size crop rejects zero dimensions. Keep the
+		// subtitle canvas and center it on the encoded frame.
+		return source + "scale[sub];[0:" + video + "]" + videoFilter + "[main];[main][sub]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2:eof_action=pass:repeatlast=0"
+	}
+	width := strconv.Itoa(job.OutputWidth)
+	height := strconv.Itoa(job.OutputHeight)
+	return source + "scale,scale=-1:" + height + ":fast_bilinear,crop,pad=max(" + width + "\\,iw):max(" + height + "\\,ih):(ow-iw)/2:(oh-ih)/2:black@0,crop=" + width + ":" + height + "[sub];[0:" + video + "]" + videoFilter + "[main];[main][sub]overlay=eof_action=pass:repeatlast=0"
 }
 
 func appendTimestampArgs(args []string, copyTimestamps bool) []string {
@@ -557,16 +579,34 @@ func isX264Preset(preset string) bool {
 	}
 }
 
-func escapeSubtitleFilterPath(path string) string {
+// EscapeSubtitleFilterPath escapes path for a quoted subtitles filter
+// option (f= or fontsdir=).
+func EscapeSubtitleFilterPath(path string) string {
 	return subtitleFilterPathEscaper.Replace(path)
 }
 
 func subtitleFilterFileSource(path string) string {
-	return "subtitles=f='" + escapeSubtitleFilterPath(path) + "'"
+	return "subtitles=f='" + EscapeSubtitleFilterPath(path) + "'"
+}
+
+// subtitleSourcePath names the file a burn-in reads: the subtitle's own path,
+// the media file, or a live input's broker URL. A live job has no input path.
+func subtitleSourcePath(job EncodingJob) string {
+	if job.SubtitleStream != nil && job.SubtitleStream.Path != "" {
+		return job.SubtitleStream.Path
+	}
+	if job.InputPath != "" {
+		return job.InputPath
+	}
+	if job.LiveInput != nil {
+		return job.LiveInput.URL
+	}
+	return ""
 }
 
 // textSubtitleFileSource returns the subtitles filter source operand of a
-// text subtitle: the external file, the cached extraction, or the media file.
+// text subtitle: the external file, the cached extraction, or the media
+// source.
 func textSubtitleFileSource(job EncodingJob) string {
 	subtitle := job.SubtitleStream
 	switch {
@@ -575,7 +615,7 @@ func textSubtitleFileSource(job EncodingJob) string {
 	case subtitle.ExtractedPath != "":
 		return subtitleFilterFileSource(subtitle.ExtractedPath)
 	default:
-		return subtitleFilterFileSource(job.InputPath)
+		return subtitleFilterFileSource(subtitleSourcePath(job))
 	}
 }
 
@@ -592,7 +632,7 @@ func textSubtitleBurnFilter(job EncodingJob, alpha bool) string {
 		filter += ":alpha=1:sub2video=1"
 	}
 	if subtitle.FontsDir != "" {
-		filter += ":fontsdir='" + escapeSubtitleFilterPath(subtitle.FontsDir) + "'"
+		filter += ":fontsdir='" + EscapeSubtitleFilterPath(subtitle.FontsDir) + "'"
 	}
 	return filter
 }

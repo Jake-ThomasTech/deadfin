@@ -780,6 +780,27 @@ func assertCompositionRoutes(t *testing.T, routes []router.Route) {
 	want := map[string]router.Route{
 		"GET /deadfin/v1/build":                                                 {OperationID: "NATIVE:GetBuild", Anonymous: true},
 		"GET /deadfin/v1/setup":                                                 {OperationID: "NATIVE:UnlockSetup", Anonymous: true},
+		"GET /deadfin/v1/workers/connect":                                       {OperationID: "NATIVE:TranscodeWorkerConnect", Worker: true},
+		"GET /deadfin/v1/workers/jobs/{id}/source":                              {OperationID: "NATIVE:TranscodeWorkerSource", Worker: true},
+		"PUT /deadfin/v1/workers/jobs/{id}/files/{name}":                        {OperationID: "NATIVE:TranscodeWorkerFile", Worker: true},
+		"GET /deadfin/v1/workers/jobs/{id}/assets/{name}":                       {OperationID: "NATIVE:TranscodeWorkerAsset", Worker: true},
+		"POST /deadfin/v1/workers/jobs/{id}/output":                             {OperationID: "NATIVE:TranscodeWorkerOutput", Worker: true},
+		"GET /deadfin/v1/transcode-workers":                                     {OperationID: "NATIVE:GetTranscodeWorkers", Policy: string(auth.PolicyRequiresElevation)},
+		"GET /deadfin/v1/transcode-workers/join-tokens":                         {OperationID: "NATIVE:GetTranscodeWorkerJoinTokens", Policy: string(auth.PolicyRequiresElevation)},
+		"POST /deadfin/v1/transcode-workers/join-tokens":                        {OperationID: "NATIVE:CreateTranscodeWorkerJoinToken", Policy: string(auth.PolicyRequiresElevation)},
+		"DELETE /deadfin/v1/transcode-workers/join-tokens/{tokenId}":            {OperationID: "NATIVE:RevokeTranscodeWorkerJoinToken", Policy: string(auth.PolicyRequiresElevation)},
+		"GET /deadfin/v1/transcode-workers/pins":                                {OperationID: "NATIVE:GetTranscodeWorkerPins", Policy: string(auth.PolicyRequiresElevation)},
+		"PUT /deadfin/v1/transcode-workers/pins":                                {OperationID: "NATIVE:SetTranscodeWorkerPins", Policy: string(auth.PolicyRequiresElevation)},
+		"GET /deadfin/v1/transcode-workers/policy":                              {OperationID: "NATIVE:GetTranscodeWorkerPolicy", Policy: string(auth.PolicyRequiresElevation)},
+		"PUT /deadfin/v1/transcode-workers/policy":                              {OperationID: "NATIVE:SetTranscodeWorkerPolicy", Policy: string(auth.PolicyRequiresElevation)},
+		"GET /deadfin/v1/transcode-workers/plain-http":                          {OperationID: "NATIVE:GetTranscodeWorkerPlainHttp", Policy: string(auth.PolicyRequiresElevation)},
+		"POST /deadfin/v1/transcode-workers/scaling-token":                      {OperationID: "NATIVE:CreateTranscodeWorkerScalingToken", Policy: string(auth.PolicyRequiresElevation)},
+		"DELETE /deadfin/v1/transcode-workers/scaling-token":                    {OperationID: "NATIVE:DeleteTranscodeWorkerScalingToken", Policy: string(auth.PolicyRequiresElevation)},
+		"GET /deadfin/v1/metrics":                                               {OperationID: "NATIVE:GetMetrics", Policy: string(auth.PolicyRequiresElevation), ScalingCredential: true},
+		"GET /deadfin/v1/workers/scaling":                                       {OperationID: "NATIVE:GetTranscodeWorkerScaling", Policy: string(auth.PolicyRequiresElevation), ScalingCredential: true},
+		"POST /deadfin/v1/transcode-workers/{workerId}":                         {OperationID: "NATIVE:UpdateTranscodeWorker", Policy: string(auth.PolicyRequiresElevation)},
+		"DELETE /deadfin/v1/transcode-workers/{workerId}":                       {OperationID: "NATIVE:RevokeTranscodeWorker", Policy: string(auth.PolicyRequiresElevation)},
+		"GET /deadfin/v1/livetv/tunerhosts/{id}/groups":                         {OperationID: "NATIVE:GetTunerHostGroups", Policy: "RequiresElevation"},
 		"GET /System/Info/Public":                                               {OperationID: "GetPublicSystemInfo", Anonymous: true},
 		"GET /System/Info":                                                      {OperationID: "GetSystemInfo", Policy: string(auth.PolicyDefaultAuthorization)},
 		"GET /System/Endpoint":                                                  {OperationID: "GetEndpointInfo", Policy: string(auth.PolicyDefaultAuthorization)},
@@ -1127,7 +1148,7 @@ func assertCompositionRoutes(t *testing.T, routes []router.Route) {
 	got := make(map[string]router.Route, len(routes))
 	for _, route := range routes {
 		key := route.Method + " " + route.Pattern
-		got[key] = router.Route{OperationID: route.OperationID, Policy: route.Policy, Anonymous: route.Anonymous, PlaySessionCredential: route.PlaySessionCredential, OptionalIdentity: route.OptionalIdentity}
+		got[key] = router.Route{OperationID: route.OperationID, Policy: route.Policy, Anonymous: route.Anonymous, PlaySessionCredential: route.PlaySessionCredential, OptionalIdentity: route.OptionalIdentity, Worker: route.Worker, ScalingCredential: route.ScalingCredential}
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("registered route metadata = %#v, want %#v", got, want)

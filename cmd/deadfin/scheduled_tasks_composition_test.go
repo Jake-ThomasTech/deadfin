@@ -32,7 +32,8 @@ func TestScheduledTasksCompositionReturnsTwelveTasksElevated(t *testing.T) {
 		t.Fatal("login returned no access token")
 	}
 
-	// GET /ScheduledTasks with elevated identity should return 12 tasks.
+	// GET /ScheduledTasks with elevated identity should return 13 tasks: the 12 stock
+	// built-ins and the Refresh Guide task, hidden while no tuner is set.
 	rec := authenticatedCompositionRequest(app.Router(), http.MethodGet, "/ScheduledTasks", nil, token)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /ScheduledTasks status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -41,8 +42,8 @@ func TestScheduledTasksCompositionReturnsTwelveTasksElevated(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &tasks); err != nil {
 		t.Fatalf("unmarshal ScheduledTasks response: %v; body: %s", err, rec.Body.String())
 	}
-	if len(tasks) != 12 {
-		t.Fatalf("ScheduledTasks returned %d tasks, want 12", len(tasks))
+	if len(tasks) != 13 {
+		t.Fatalf("ScheduledTasks returned %d tasks, want 13", len(tasks))
 	}
 }
 

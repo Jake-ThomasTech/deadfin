@@ -80,7 +80,7 @@ func (s *ItemStore) ReconciliationChildren(ctx context.Context, parentID dto.UUI
 		return nil, err
 	}
 	defer rollbackOnReturn(tx, &err)
-	children, err := s.reconcileDirectChildren(ctx, tx, parentID)
+	children, err := s.reconcileDirectChildren(ctx, tx, parentID, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +222,10 @@ func (s *ItemStore) reconcileScannedPlan(ctx context.Context, parentID dto.UUID,
 		}
 	}
 
-	current, err := s.reconcileDirectChildren(ctx, tx, parentID)
+	// A merge that keeps unplanned children deletes none, so it reads only
+	// the planned ones. A full read per call made a chunked merge of a
+	// large folder (70 000 Live TV channels) quadratic.
+	current, err := s.reconcileDirectChildren(ctx, tx, parentID, desired, options.PreserveUnplannedChildren)
 	if err != nil {
 		return ReconcileChildrenResult{}, err
 	}
@@ -708,27 +711,45 @@ func (s *ItemStore) removeFormerKindSatellites(ctx context.Context, tx *sql.Tx, 
 	return nil
 }
 
-func (s *ItemStore) reconcileDirectChildren(ctx context.Context, tx *sql.Tx, parentID dto.UUID) (map[dto.UUID]item.Item, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT "+strings.Join(itemColumns, ", ")+" FROM items WHERE parent_id = "+s.ph(1)+" ORDER BY id", s.uuidArg(parentID))
+// reconcileDirectChildren reads the direct children of parentID, or with
+// planned set only those among only.
+func (s *ItemStore) reconcileDirectChildren(ctx context.Context, tx *sql.Tx, parentID dto.UUID, only []item.Item, planned bool) (map[dto.UUID]item.Item, error) {
+	query := "SELECT " + strings.Join(itemColumns, ", ") + " FROM items WHERE parent_id = " + s.ph(1)
+	args := []any{s.uuidArg(parentID)}
+	if planned {
+		if len(only) == 0 {
+			return map[dto.UUID]item.Item{}, nil
+		}
+		marks := make([]string, len(only))
+		for index, child := range only {
+			args = append(args, s.uuidArg(child.ID))
+			marks[index] = s.ph(index + 2)
+		}
+		query += " AND id IN (" + strings.Join(marks, ", ") + ")"
+	}
+	rows, err := tx.QueryContext(ctx, query+" ORDER BY id", args...)
 	if err != nil {
 		return nil, err
 	}
-	children := make(map[dto.UUID]item.Item)
+	var list []item.Item
 	for rows.Next() {
 		child, err := scanItem(rows, s.stores.Dialect())
 		if err != nil {
 			return nil, closeRows(rows, err)
 		}
-		children[child.ID] = child
+		list = append(list, child)
 	}
 	if err := closeRows(rows, rows.Err()); err != nil {
 		return nil, err
 	}
-	for id, child := range children {
-		if err := s.loadSatellites(ctx, tx, &child); err != nil {
-			return nil, err
-		}
-		children[id] = child
+	// One query per satellite family per page, not per child: a folder of
+	// 70 000 Live TV channels took 560 000 queries on the writer.
+	if err := s.loadPageSatellites(ctx, tx, list); err != nil {
+		return nil, err
+	}
+	children := make(map[dto.UUID]item.Item, len(list))
+	for _, child := range list {
+		children[child.ID] = child
 	}
 	return children, nil
 }

@@ -441,13 +441,33 @@ func Translate(query ItemQuery, d Dialect) (TranslatedItemQuery, error) {
 	} else {
 		where, filterArgs = applyResumeParentScope(structuralQuery, d, where, filterArgs)
 	}
-	withSQL, selectedIDs, transformedArgs, err := translateItemQueryIDRelation(structuralQuery, d, source, where, filterArgs)
+	relation, err := translateItemQueryIDRelation(structuralQuery, d, source, where, filterArgs)
 	if err != nil {
 		return TranslatedItemQuery{}, err
 	}
+	withSQL, selectedIDs, transformedArgs := relation.withSQL(), relation.current, relation.args
 	filteredFrom, filteredWhere := "", ""
-	if withSQL == "WITH "+newItemQueryIDRelation(d, source, where, nil).ctes[0] && selectedIDs == "filtered_ids" && !strings.Contains(where, resumeWinnerCTEReference) {
+	if len(relation.ctes) == 1 && selectedIDs == "filtered_ids" && !strings.Contains(where, resumeWinnerCTEReference) {
 		filteredFrom, filteredWhere = source, where
+	}
+	// directWhere selects the page straight from items when the relation is
+	// the base filters, optionally narrowed by visibility. The planner then
+	// sees every predicate on the ordered table and can walk an index in the
+	// requested order and stop at the limit. Behind "id IN (SELECT id FROM
+	// <cte>)" it sorts every item first (Live TV guide: 3.7 s to 0.6 s).
+	directWhere, direct := "", false
+	if source == "items" && !strings.Contains(where, resumeWinnerCTEReference) {
+		switch {
+		case len(relation.ctes) == 1 && selectedIDs == "filtered_ids":
+			directWhere, direct = where, true
+		case len(relation.ctes) == 2 && selectedIDs == "visible_ids" && relation.access != "":
+			if where == "" {
+				directWhere = " WHERE " + relation.access
+			} else {
+				directWhere = where + " AND (" + relation.access + ")"
+			}
+			direct = true
+		}
 	}
 
 	// Inject the bounded Resume progress CTEs when the resumable filter set
@@ -490,6 +510,9 @@ func Translate(query ItemQuery, d Dialect) (TranslatedItemQuery, error) {
 	}
 	args = append(args, orderArgs...)
 	pageSQL := withSQL + " SELECT " + strings.Join(itemColumns, ", ") + " FROM items WHERE items.id IN (SELECT id FROM " + selectedIDs + ") ORDER BY " + orderBy
+	if direct {
+		pageSQL = "SELECT " + strings.Join(itemColumns, ", ") + " FROM items" + directWhere + " ORDER BY " + orderBy
+	}
 
 	if query.Limit != nil {
 		pageSQL += " LIMIT " + d.Placeholder(len(args)+1)

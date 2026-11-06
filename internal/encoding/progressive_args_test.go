@@ -700,3 +700,18 @@ func argvDifference(want, got []string) string {
 	}
 	return ""
 }
+
+// A live job has no input path; a text subtitle burn-in must read the broker
+// URL instead of an empty filename.
+func TestLiveTextSubtitleBurnInReadsTheBrokerURL(t *testing.T) {
+	job := progressiveUnitJob()
+	job.InputPath = ""
+	job.LiveInput = &LiveInput{URL: "http://127.0.0.1:8096/LiveTv/LiveStreamFiles/x/stream.ts"}
+	job.SubtitleStream = &SubtitleStream{InputIndex: 0, Index: 2, SubtitleIndex: 0, Codec: "subrip", BurnIn: true}
+
+	args := mustBuildProgressiveArgs(t, job, progressiveTestCapabilities())
+	filter := argumentValue(t, args, "-vf")
+	if !strings.Contains(filter, `subtitles=f='http\://127.0.0.1\:8096/LiveTv/LiveStreamFiles/x/stream.ts'`) {
+		t.Errorf("-vf = %q, want the broker URL as the subtitle source", filter)
+	}
+}

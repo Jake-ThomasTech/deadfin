@@ -45,6 +45,7 @@ type Authorizer struct {
 	evaluator Evaluator
 	users     Users
 	grants    PlaySessionGrants
+	scaling   func(*http.Request) (bool, error)
 }
 
 // NewAuthorizer constructs route authorization from independently supplied
@@ -60,8 +61,20 @@ func (authorizer *Authorizer) WithPlaySessionGrants(grants PlaySessionGrants) *A
 	return authorizer
 }
 
+// WithScalingCredential enables the scaling token on routes that declare
+// ScalingCredential (#617), and returns authorizer. check reports whether
+// the request carries a valid scaling token.
+func (authorizer *Authorizer) WithScalingCredential(check func(*http.Request) (bool, error)) *Authorizer {
+	authorizer.scaling = check
+	return authorizer
+}
+
 // Wrap returns a handler that enforces route metadata before calling next.
 func (authorizer *Authorizer) Wrap(route router.Route, next http.Handler) http.Handler {
+	if route.Worker {
+		// The worker route checks its own credential; no user identity.
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if route.Anonymous {
 			if route.OptionalIdentity && authorizer != nil && authorizer.resolver != nil {
@@ -81,6 +94,17 @@ func (authorizer *Authorizer) Wrap(route router.Route, next http.Handler) http.H
 		if authorizer == nil || authorizer.resolver == nil || authorizer.evaluator == nil || authorizer.users == nil {
 			writeAuthorizationError(w, http.StatusInternalServerError)
 			return
+		}
+		if route.ScalingCredential && authorizer.scaling != nil {
+			allowed, err := authorizer.scaling(request)
+			if err != nil {
+				writeAuthorizationError(w, http.StatusInternalServerError)
+				return
+			}
+			if allowed {
+				next.ServeHTTP(w, request)
+				return
+			}
 		}
 
 		request = request.WithContext(auth.NewRequestCache(request.Context()))
@@ -213,10 +237,9 @@ func writeAuthorizationError(w http.ResponseWriter, status int) {
 	http.Error(w, http.StatusText(status), status)
 }
 
-// NormalizeClientAddress derives the transport peer address without trusting
-// forwarded headers. Forwarded client addresses remain unsupported; only the
-// setup cookie reads a forwarded scheme, from KnownProxies peers
-// (ForwardedScheme).
+// NormalizeClientAddress derives the transport peer address from a
+// RemoteAddr value. It reads no forwarded header; ClientAddress applies
+// X-Forwarded-For from KnownProxies peers.
 func NormalizeClientAddress(remoteAddress string) netip.Addr {
 	host, _, err := net.SplitHostPort(remoteAddress)
 	if err != nil {
@@ -231,8 +254,8 @@ func NormalizeClientAddress(remoteAddress string) netip.Addr {
 
 type clientAddressContextKey struct{}
 
-// WithClientAddress installs a normalized transport peer address at the HTTP
-// middleware boundary. It accepts no forwarded-header input.
+// WithClientAddress installs a normalized client address at the HTTP
+// middleware boundary (ClientAddresses).
 func WithClientAddress(ctx context.Context, address netip.Addr) context.Context {
 	if address.IsValid() {
 		address = address.Unmap()
@@ -240,7 +263,7 @@ func WithClientAddress(ctx context.Context, address netip.Addr) context.Context 
 	return context.WithValue(ctx, clientAddressContextKey{}, address)
 }
 
-// ClientAddressFromContext returns the normalized transport peer address.
+// ClientAddressFromContext returns the normalized client address.
 // Callers receive an invalid address when no transport middleware installed it.
 func ClientAddressFromContext(ctx context.Context) netip.Addr {
 	address, _ := ctx.Value(clientAddressContextKey{}).(netip.Addr)

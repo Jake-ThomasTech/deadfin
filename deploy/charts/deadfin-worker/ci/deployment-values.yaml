@@ -1,0 +1,29 @@
+# helm lint and helm template input: Deployments scaled by KEDA.
+server:
+  url: https://deadfin.example
+token:
+  existingSecret: deadfin-worker-join
+mode: deployment
+gpu:
+  mountDri: false
+  runtimeClassName: nvidia
+pools:
+  - name: nvenc
+    maxJobs: 3
+    hwType: nvenc
+    hwSessions: 3
+    resources:
+      limits: { nvidia.com/gpu: 1 }
+    keda:
+      minReplicaCount: 0
+  - name: cpu
+    replicas: 2
+    maxJobs: 2
+    keda:
+      trigger: prometheus
+      prometheus:
+        serverAddress: http://prometheus.monitoring:9090
+keda:
+  enabled: true
+  metricsApi:
+    tokenSecret: deadfin-scaling-token

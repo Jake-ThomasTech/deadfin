@@ -1131,3 +1131,43 @@ func (r *lockedBytesReader) Read(data []byte) (int, error) {
 	defer r.mu.Unlock()
 	return r.reader.Read(data)
 }
+
+// A policy save that omits LimitLiveTvToSharedLists keeps the stored value,
+// so a stock client cannot clear it; a save that sends it replaces it (D-105).
+func TestServiceUpdatePolicyKeepsDeadfinFields(t *testing.T) {
+	service, _, _ := openUserService(t)
+	ctx := t.Context()
+	account, err := service.Create(ctx, "shared-lists-target", "initial password")
+	if err != nil {
+		t.Fatalf("create policy target: %v", err)
+	}
+	limit := func() *bool {
+		t.Helper()
+		stored, err := service.Get(ctx, account.ID)
+		if err != nil {
+			t.Fatalf("get policy target: %v", err)
+		}
+		var policy dto.UserPolicy
+		if err := json.Unmarshal(stored.Policy, &policy); err != nil {
+			t.Fatalf("decode stored policy %s: %v", stored.Policy, err)
+		}
+		return policy.LimitLiveTvToSharedLists
+	}
+	for _, step := range []struct {
+		document string
+		want     *bool
+	}{
+		{`{"IsHidden":true}`, nil},
+		{`{"IsHidden":true,"LimitLiveTvToSharedLists":true}`, new(true)},
+		{`{"IsHidden":false}`, new(true)},
+		{`{"IsHidden":false,"LimitLiveTvToSharedLists":false}`, new(false)},
+		{`{"IsHidden":true}`, new(false)},
+	} {
+		if err := service.UpdatePolicy(ctx, account.ID, json.RawMessage(step.document)); err != nil {
+			t.Fatalf("UpdatePolicy(%s): %v", step.document, err)
+		}
+		if got := limit(); !reflect.DeepEqual(got, step.want) {
+			t.Fatalf("after %s LimitLiveTvToSharedLists = %v, want %v", step.document, got, step.want)
+		}
+	}
+}

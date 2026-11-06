@@ -12,11 +12,21 @@ source:
 # Operation annotations.
 # Each entry can set status, disposition, reason, clients, and ratchet.
 # status: deferred marks a route that Deadfin intentionally does not serve.
+# status: implemented marks a LiveTv or SyncPlay route that serves real
+# behavior instead of the D2 stub.
 # clients: [swiftfin] marks Swiftfin REST membership (the 95-operation set).
 operations:
   AddItemToPlaylist:
     status: deferred
     reason: "deferred: Playlists not implemented"
+
+  AddListingProvider:
+    status: implemented
+    reason: "Live TV P5b admin API (#541)"
+
+  AddTunerHost:
+    status: implemented
+    reason: "Live TV P5b admin API (#541)"
 
   AddUserToSession:
     status: deferred
@@ -27,8 +37,6 @@ operations:
     reason: "deferred: Collections not implemented"
 
   CreateKey:
-    status: deferred
-    reason: "deferred: API key management not implemented"
     clients: [swiftfin]
 
   CreatePlaylist:
@@ -45,8 +53,6 @@ operations:
     reason: "deferred: alternate source deletion not implemented"
 
   DeleteDevice:
-    status: deferred
-    reason: "deferred: device management not implemented"
     clients: [swiftfin]
 
   DeleteItem:
@@ -68,6 +74,10 @@ operations:
     status: deferred
     reason: "deferred: item write/delete not implemented"
 
+  DeleteListingProvider:
+    status: implemented
+    reason: "Live TV P5b admin API (#541)"
+
   DeleteLyrics:
     status: deferred
     reason: "deferred: Lyrics not implemented"
@@ -76,6 +86,10 @@ operations:
     status: deferred
     reason: "deferred: subtitle upload/delete not implemented"
     clients: [swiftfin]
+
+  DeleteTunerHost:
+    status: implemented
+    reason: "Live TV P5b admin API (#541)"
 
   DeleteUser:
     status: deferred
@@ -128,6 +142,10 @@ operations:
     status: deferred
     reason: "deferred: auth provider config not implemented"
 
+  GetChannel:
+    status: implemented
+    reason: "Live TV P6 read API (#541)"
+
   GetChannelFeatures:
     status: deferred
     reason: "deferred: Channels not implemented"
@@ -136,25 +154,23 @@ operations:
     status: deferred
     reason: "deferred: Channels not implemented"
 
+  GetChannelMappingOptions:
+    status: implemented
+    reason: "Live TV P5b admin API (#541)"
+
   GetChannels:
     status: deferred
     reason: "deferred: Channels not implemented"
+
+  GetDefaultListingProvider:
+    status: implemented
+    reason: "Live TV P5b admin API (#541)"
 
   GetDefaultMetadataOptions:
     status: deferred
     reason: "deferred: system configuration management not implemented"
 
-  GetDeviceInfo:
-    status: deferred
-    reason: "deferred: device management not implemented"
-
-  GetDeviceOptions:
-    status: deferred
-    reason: "deferred: device management not implemented"
-
   GetDevices:
-    status: deferred
-    reason: "deferred: device management not implemented"
     clients: [swiftfin]
 
   GetFallbackFont:
@@ -180,6 +196,10 @@ operations:
   GetGenreImageByIndex:
     status: deferred
     reason: "deferred: named-entity image endpoints not implemented"
+
+  GetGuideInfo:
+    status: implemented
+    reason: "Live TV P5b admin API (#541)"
 
   GetInstantMixFromAlbum:
     status: deferred
@@ -218,8 +238,6 @@ operations:
     reason: "deferred: item user-data read not implemented"
 
   GetKeys:
-    status: deferred
-    reason: "deferred: API key management not implemented"
     clients: [swiftfin]
 
   GetLatestChannelItems:
@@ -227,8 +245,6 @@ operations:
     reason: "deferred: Channels not implemented"
 
   GetLogFile:
-    status: deferred
-    reason: "deferred: server log access not implemented"
     clients: [swiftfin]
 
   GetLyrics:
@@ -307,8 +323,6 @@ operations:
     reason: "deferred: root folder endpoint not implemented"
 
   GetServerLogs:
-    status: deferred
-    reason: "deferred: server log access not implemented"
     clients: [swiftfin]
 
   GetStudio:
@@ -338,6 +352,10 @@ operations:
   GetTrailers:
     status: deferred
     reason: "deferred: Trailers list not implemented"
+
+  GetTunerHostTypes:
+    status: implemented
+    reason: "Live TV P5b admin API (#541)"
 
   GetUpcomingEpisodes:
     status: deferred
@@ -454,8 +472,6 @@ operations:
     clients: [swiftfin]
 
   RevokeKey:
-    status: deferred
-    reason: "deferred: API key management not implemented"
     clients: [swiftfin]
 
   SHADOW:DeleteUserImageByIndexLegacy:
@@ -559,6 +575,10 @@ operations:
     status: deferred
     reason: "deferred: system command not implemented"
 
+  SetChannelMapping:
+    status: implemented
+    reason: "Live TV P5b admin API (#541)"
+
   SetItemImage:
     status: deferred
     reason: "deferred: item image upload/delete not implemented"
@@ -582,8 +602,6 @@ operations:
     reason: "deferred: system configuration management not implemented"
 
   UpdateDeviceOptions:
-    status: deferred
-    reason: "deferred: device management not implemented"
     clients: [swiftfin]
 
   UpdateItem:
@@ -687,7 +705,21 @@ operations:
   GetLatestMedia:
     clients: [swiftfin]
 
+  GetLineups:
+    status: implemented
+    reason: "Live TV P5b admin API (#541)"
+
+  GetLiveTvChannels:
+    status: implemented
+    reason: "Live TV P6 read API (#541)"
+
+  GetLiveTvInfo:
+    status: implemented
+    reason: "Live TV P6 read API (#541)"
+
   GetLiveTvPrograms:
+    status: implemented
+    reason: "Live TV P6 read API (#541)"
     clients: [swiftfin]
 
   GetLocalTrailers:
@@ -714,6 +746,14 @@ operations:
   GetPostedPlaybackInfo:
     clients: [swiftfin]
 
+  GetProgram:
+    status: implemented
+    reason: "Live TV P6 read API (#541)"
+
+  GetPrograms:
+    status: implemented
+    reason: "Live TV P6 read API (#541)"
+
   GetPublicSystemInfo:
     clients: [swiftfin]
 
@@ -727,6 +767,8 @@ operations:
     clients: [swiftfin]
 
   GetRecommendedPrograms:
+    status: implemented
+    reason: "Live TV P6 read API (#541)"
     clients: [swiftfin]
 
   GetRecordings:

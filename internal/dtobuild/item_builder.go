@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/deadfin-org/deadfin/internal/clock"
 	"github.com/deadfin-org/deadfin/internal/dto"
 	"github.com/deadfin-org/deadfin/internal/item"
 	"github.com/deadfin-org/deadfin/internal/path"
@@ -60,6 +61,7 @@ type Builder struct {
 	enricher BatchEnricher
 	serverID string
 	paths    path.VirtualPathExpander
+	clock    clock.Clock
 }
 
 // NewBuilder creates a DTO builder using items for batch-backed projections.
@@ -108,6 +110,9 @@ func (b *Builder) Build(ctx context.Context, values []item.Item, options store.I
 	result.Items = make([]dto.BaseItemDto, 0, len(values))
 	for _, value := range values {
 		result.Items = append(result.Items, projectCore(value, enrichment[value.ID], options, userID, b.serverID, b.paths))
+	}
+	if err := b.projectLiveTv(ctx, values, result.Items, options, userID); err != nil {
+		return dto.QueryResult[dto.BaseItemDto]{}, err
 	}
 	result.TotalRecordCount = len(result.Items)
 	return result, nil

@@ -386,7 +386,7 @@ func progressiveVideoContainer(w http.ResponseWriter, r *http.Request, queryCont
 		container = chi.URLParam(r, "container")
 	}
 	container = strings.ToLower(strings.TrimSpace(container))
-	if container != "ts" && container != "mp4" {
+	if container != "ts" && container != "mp4" && container != "mkv" {
 		badRequest(w)
 		return "", false
 	}

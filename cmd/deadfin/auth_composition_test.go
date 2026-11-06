@@ -35,6 +35,7 @@ func TestApplicationComposesPersistentLoginSessionsAndDisplayPreferences(t *test
 	}
 	app = newCompositionApplication(t, root)
 
+	// Play sessions live in memory by default (D-06); the reload is off.
 	assertAuthenticatedStatus(t, app.Router(), http.MethodGet, "/Users/Me", nil, token, http.StatusOK)
 	assertSessionCount(t, app.Router(), token, 0)
 	assertDisplayPreferences(t, app.Router(), preferencesPath, token)

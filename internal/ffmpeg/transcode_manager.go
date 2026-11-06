@@ -25,6 +25,9 @@ import (
 const (
 	maxTranscodeStderr   = 1 << 20
 	maxFailureDiagnostic = 64 << 10
+	// maxFailureLogTail bounds the ffmpeg log tail copied into a failure
+	// record: enough for the reason, small enough for one log line.
+	maxFailureLogTail = 4 << 10
 
 	// defaultCacheBytesPerSession caps the HLS transcode-cache family at
 	// 1 GiB of apparent on-disk bytes. Zero values in TranscodeManagerOptions
@@ -64,6 +67,18 @@ type TranscodeManagerOptions struct {
 	// Logger receives one error record when ffmpeg fails to start or exits
 	// with an error that the manager did not cause. Nil discards the records.
 	Logger *slog.Logger
+	// RemoteRunner is the transcode-worker seam (#614). Nil keeps
+	// every job local. HLS families move, except a burn-in that reads the
+	// media file itself; a RemoteProgressiveRunner also takes progressive
+	// transcodes (#624).
+	RemoteRunner RemoteRunner
+	// KeepFamilies are the remote families that kept running on their
+	// hosts across a restart (#618). The startup wipe keeps their files, so
+	// the families can be adopted (AdoptHLS).
+	KeepFamilies []KeptFamily
+	// KeepTranscodes skips the startup wipe: a live server replica may
+	// share the directory (#652).
+	KeepTranscodes bool
 }
 
 // ProgressiveRequest identifies one progressive ffmpeg invocation. Args excludes
@@ -94,11 +109,14 @@ type TranscodeManager struct {
 	hlsSessions           map[string]map[*transcodeJob]struct{}
 	closed                bool
 
-	workers      sync.WaitGroup
-	workerCount  int
-	shutdownDone chan struct{}
-	shutdownOnce sync.Once
-	shutdownErr  error
+	workers     sync.WaitGroup
+	workerCount int
+	// handoffCtx bounds the handoff restarts; Close cancels it.
+	handoffCtx    context.Context
+	handoffCancel context.CancelFunc
+	shutdownDone  chan struct{}
+	shutdownOnce  sync.Once
+	shutdownErr   error
 
 	beforeIdleStop           func()
 	beforeOutputMutation     func()
@@ -132,26 +150,36 @@ type transcodeJob struct {
 	output  string
 	args    []string
 
-	startDone    chan struct{}
-	waitDone     chan struct{}
+	startDone chan struct{}
+	waitDone  chan struct{}
+	// startCtx ends when every HLS request that waits for the start gives
+	// up, so a job queued for a transcode worker leaves the queue (#616).
+	startCtx     context.Context
+	startCancel  context.CancelFunc
+	startWaiters int
 	startupErr   error
 	waitErr      error
 	state        transcodeState
 	leaderExited bool
 
-	cmd    *exec.Cmd
+	proc   process
 	stdin  io.WriteCloser
 	stderr *os.File
 	// logPath names the ffmpeg log file for failure records.
 	logPath string
 
-	requests              int
-	idleTimer             clock.Timer
-	idleCancel            chan struct{}
-	idleTimeout           time.Duration
-	stopOnce              sync.Once
-	reapPending           bool
-	reapPID               int
+	requests    int
+	idleTimer   clock.Timer
+	idleCancel  chan struct{}
+	idleTimeout time.Duration
+	stopOnce    sync.Once
+	reapPending bool
+	reapProc    process
+	// runnerLost records a remote host that vanished mid-stream.
+	runnerLost bool
+	// released records a remote family that its host keeps running across
+	// the server restart (#618); its artifacts stay.
+	released              bool
 	reapSucceeded         bool
 	reapDone              chan struct{}
 	reapAttempt           chan struct{}
@@ -181,6 +209,8 @@ type transcodeJob struct {
 	source         *sourcefile.Source
 	sourceAux      *os.File
 	subtitle       *sourcefile.Source
+	// fonts are the font files a remote burn-in borrows (#624).
+	fonts []*os.File
 }
 
 // NewTranscodeManager creates a manager and clears exactly its owned temporary
@@ -204,8 +234,10 @@ func NewTranscodeManager(ffmpegPath, transcodesDir string, options TranscodeMana
 	if err := validateProgressiveOptions(options); err != nil {
 		return nil, err
 	}
-	if err := os.RemoveAll(directory); err != nil {
-		return nil, err
+	if !options.KeepTranscodes {
+		if err := clearTranscodes(directory, options.KeepFamilies); err != nil {
+			return nil, err
+		}
 	}
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return nil, err
@@ -228,7 +260,10 @@ func NewTranscodeManager(ffmpegPath, transcodesDir string, options TranscodeMana
 			return nil, fmt.Errorf("canonicalize ffmpeg log directory: %w", logErr)
 		}
 	}
+	handoffCtx, handoffCancel := context.WithCancel(context.Background())
 	return &TranscodeManager{
+		handoffCtx:            handoffCtx,
+		handoffCancel:         handoffCancel,
 		ffmpegPath:            ffmpegPath,
 		directory:             canonicalDirectory,
 		requestedDirectory:    directory,
@@ -459,6 +494,9 @@ func (manager *TranscodeManager) start(job *transcodeJob) {
 		manager.failStartAfterPrepare(job, err)
 		return
 	}
+	if manager.startRemote(job) || manager.startRemoteProgressive(job) {
+		return
+	}
 	command := exec.Command(manager.ffmpegPath, args...)
 	command.ExtraFiles = extraFiles
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -553,7 +591,7 @@ func (manager *TranscodeManager) start(job *transcodeJob) {
 	}
 
 	manager.mu.Lock()
-	job.cmd = command
+	job.proc = localProcess{manager: manager, cmd: command, hls: job.hls != nil}
 	job.stdin = stdin
 	job.stderr = stderr
 	job.logPath = stderr.Name()
@@ -703,6 +741,10 @@ func (manager *TranscodeManager) commandArgs(job *transcodeJob) ([]string, []*os
 }
 
 func (manager *TranscodeManager) closeJobSourceLocked(job *transcodeJob) {
+	for _, font := range job.fonts {
+		_ = font.Close()
+	}
+	job.fonts = nil
 	if job.sourceAux != nil {
 		_ = job.sourceAux.Close()
 		job.sourceAux = nil
@@ -868,6 +910,9 @@ func (manager *TranscodeManager) finishStart(job *transcodeJob, err error) {
 	manager.closeJobSourceLocked(job)
 	job.startupErr = err
 	job.state = transcodeExited
+	if job.startCancel != nil {
+		job.startCancel()
+	}
 	if manager.jobs[job.output] == job {
 		delete(manager.jobs, job.output)
 	}
@@ -896,13 +941,24 @@ func (manager *TranscodeManager) failStartAfterPrepare(job *transcodeJob, startu
 }
 
 func (manager *TranscodeManager) wait(job *transcodeJob) {
-	err := job.cmd.Wait()
-	if errors.Is(err, exec.ErrWaitDelay) && job.hls != nil && job.cmd.ProcessState != nil && job.cmd.ProcessState.Success() {
-		err = nil
-	}
+	err := job.proc.wait()
 
 	manager.mu.Lock()
 	terminating := job.state == transcodeTerminating
+	lost := false
+	if errors.Is(err, ErrRunnerLost) && job.hls != nil && !terminating {
+		// The completed segments stay valid; the handoff or the next
+		// segment request restarts the family on another host.
+		job.runnerLost = true
+		lost = true
+		err = nil
+	}
+	if errors.Is(err, ErrRunnerReleased) && job.hls != nil {
+		// The host keeps the family running for the next server process.
+		job.released = true
+		err = nil
+		terminating = false
+	}
 	removeOutput := err != nil || terminating
 	stderr := job.stderr
 	stdin := job.stdin
@@ -911,7 +967,7 @@ func (manager *TranscodeManager) wait(job *transcodeJob) {
 	}
 	job.leaderExited = true
 	job.stdin = nil
-	pid := job.cmd.Process.Pid
+	proc := job.proc
 	cleanupErr := job.cleanupErr
 	manager.mu.Unlock()
 	if err != nil && !terminating {
@@ -927,12 +983,8 @@ func (manager *TranscodeManager) wait(job *transcodeJob) {
 	if job.hls == nil && stderr != nil {
 		_ = stderr.Close()
 	}
-	groupReaper := manager.reapProcessGroup
-	if groupReaper == nil {
-		groupReaper = reapProcessGroup
-	}
 	var reapErr error
-	if groupErr := groupReaper(pid); groupErr != nil {
+	if groupErr := proc.reap(); groupErr != nil {
 		reapErr = fmt.Errorf("reap ffmpeg process group: %w", groupErr)
 		err = errors.Join(err, reapErr)
 		removeOutput = true
@@ -972,7 +1024,7 @@ func (manager *TranscodeManager) wait(job *transcodeJob) {
 	if reapErr != nil {
 		job.reapPending = true
 		job.reapDone = make(chan struct{})
-		job.reapPID = pid
+		job.reapProc = proc
 		job.reapErr = reapErr
 	}
 	if reapErr != nil && removeOutput {
@@ -989,8 +1041,42 @@ func (manager *TranscodeManager) wait(job *transcodeJob) {
 	} else {
 		manager.deleteResolvedJobLocked(job)
 	}
+	handoff := lost && reapErr == nil && cleanupErr == nil && job.hls.handoff != nil && !manager.closed
+	if handoff {
+		manager.addWorkerLocked()
+	}
 	manager.mu.Unlock()
+	if handoff {
+		go manager.handOff(job)
+	}
 	manager.doneWorker()
+}
+
+// handoffTimeout bounds one handoff restart, which includes a placement
+// queue wait.
+const handoffTimeout = 2 * time.Minute
+
+// handOff restarts a family whose remote host was lost or drained at the
+// first segment the host did not complete (#617), while the client still
+// plays its buffered segments. A failed handoff leaves the restart to the
+// next segment request.
+func (manager *TranscodeManager) handOff(job *transcodeJob) {
+	defer manager.doneWorker()
+	current, found, err := job.hls.currentIndex(manager)
+	if err != nil || !found {
+		return
+	}
+	manager.mu.Lock()
+	stale := manager.jobs[job.output] != job
+	manager.mu.Unlock()
+	if stale {
+		return
+	}
+	ctx, cancel := context.WithTimeout(manager.handoffCtx, handoffTimeout)
+	defer cancel()
+	if err := job.hls.handoff(ctx, current+1); err != nil && manager.options.Logger != nil {
+		manager.options.Logger.Info("HLS handoff restart did not run; the next segment request restarts the family", "playlist", job.output, "segment", current+1, "error", err.Error())
+	}
 }
 
 // logFailure records an ffmpeg failure that a client sees only as an HTTP
@@ -1003,11 +1089,44 @@ func (manager *TranscodeManager) logFailure(job *transcodeJob, message string, e
 	attrs := []any{"output", job.output, "error", err.Error()}
 	if job.logPath != "" {
 		attrs = append(attrs, "ffmpeg_log", job.logPath)
+		// The reason is at the end of the log, and a live failure may be
+		// the only evidence: a remote operator cannot open the file.
+		if tail := logTail(job.logPath, maxFailureLogTail); tail != "" {
+			attrs = append(attrs, "ffmpeg_tail", tail)
+		}
 	}
 	if job.hls != nil {
 		attrs = append(attrs, "media_source_id", job.hls.mediaSourceID, "play_session_id", job.hls.playSessionID)
 	}
 	logger.Error(message, attrs...)
+}
+
+// logTail returns up to limit trailing bytes of the ffmpeg log, starting on a
+// whole line. An unreadable or empty log gives an empty string.
+func logTail(path string, limit int64) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || info.Size() == 0 {
+		return ""
+	}
+	offset := max(info.Size()-limit, 0)
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit))
+	if err != nil {
+		return ""
+	}
+	if offset > 0 {
+		if index := strings.IndexByte(string(data), '\n'); index >= 0 {
+			data = data[index+1:]
+		}
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func (manager *TranscodeManager) retryPendingReaps(ctx context.Context) error {
@@ -1136,14 +1255,10 @@ func (manager *TranscodeManager) beginReapAttemptLocked(job *transcodeJob) {
 	}
 	attempt := make(chan struct{})
 	job.reapAttempt = attempt
-	groupReaper := manager.reapProcessGroup
-	if groupReaper == nil {
-		groupReaper = reapProcessGroup
-	}
-	pid := job.reapPID
+	proc := job.reapProc
 	manager.addWorkerLocked()
 	go func() {
-		err := groupReaper(pid)
+		err := proc.reap()
 		manager.mu.Lock()
 		if job.reapPending {
 			if err != nil {
@@ -1369,6 +1484,7 @@ func (manager *TranscodeManager) CleanupInactive(ctx context.Context, olderThan 
 // Close starts shutdown once and waits until every owned lifecycle goroutine has
 // completed. If context expires it may be called again to continue waiting.
 func (manager *TranscodeManager) Close(ctx context.Context) error {
+	manager.handoffCancel()
 	manager.mu.Lock()
 	wasClosed := manager.closed
 	if !manager.closed {
@@ -1377,6 +1493,9 @@ func (manager *TranscodeManager) Close(ctx context.Context) error {
 		exitedHLS := make([]*transcodeJob, 0)
 		for _, job := range manager.jobs {
 			manager.cancelIdleLocked(job)
+			if job.state == transcodeStarting && job.startCancel != nil {
+				job.startCancel()
+			}
 			if job.state != transcodeExited {
 				jobs = append(jobs, job)
 			} else if job.hls != nil {
@@ -1394,6 +1513,9 @@ func (manager *TranscodeManager) Close(ctx context.Context) error {
 		for _, job := range jobs {
 			go func(job *transcodeJob) {
 				defer manager.doneWorker()
+				if manager.releaseRemote(job) {
+					return
+				}
 				job.stopOnce.Do(job.stop)
 			}(job)
 		}
@@ -1498,6 +1620,19 @@ func (manager *TranscodeManager) closeResult(ctx context.Context, wasClosed bool
 	return err
 }
 
+// leaveStart records that one request stopped waiting for the start. When
+// none waits for a job that is still starting, its start is canceled.
+func (manager *TranscodeManager) leaveStart(job *transcodeJob) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if job.startWaiters > 0 {
+		job.startWaiters--
+	}
+	if job.startWaiters == 0 && job.state == transcodeStarting && job.startCancel != nil {
+		job.startCancel()
+	}
+}
+
 func (manager *TranscodeManager) release(job *transcodeJob) {
 	manager.mu.Lock()
 	if job.requests > 0 {
@@ -1570,14 +1705,14 @@ func (job *transcodeJob) stop() {
 		manager.mu.Unlock()
 		<-startDone
 	}
-	if (job.state != transcodeRunning && job.state != transcodeTerminating) || job.cmd == nil || job.cmd.Process == nil {
+	if (job.state != transcodeRunning && job.state != transcodeTerminating) || job.proc == nil {
 		manager.mu.Unlock()
 		return
 	}
 	job.state = transcodeTerminating
 	stdin := job.stdin
 	throttler := job.throttler
-	pid := job.cmd.Process.Pid
+	proc := job.proc
 	waitDone := job.waitDone
 	manager.mu.Unlock()
 
@@ -1596,7 +1731,7 @@ func (job *transcodeJob) stop() {
 		return
 	case <-grace.C():
 	}
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	proc.kill()
 	<-waitDone
 }
 

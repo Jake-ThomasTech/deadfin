@@ -98,6 +98,12 @@ func TestIdentityRemapUserIDsRewritesEveryReference(t *testing.T) {
 			if err := items.CreatePlaylist(ctx, playlist, []store.ItemShare{{UserID: kai, CanEdit: true}}); err != nil {
 				t.Fatalf("create playlist: %v", err)
 			}
+			if err := store.NewPlaySessionStore(stores).SavePlaySessions(ctx, store.PlaySessionChanges{
+				Sessions: []store.PlaySessionRecord{{ID: "nana-session", UserID: nana, LastActivity: now, State: []byte(`{}`)}},
+				Grants:   []store.PlayGrantRecord{{PlaySessionID: "kai-grant", UserID: kai, ItemID: movie.ID, LastUsed: now}},
+			}); err != nil {
+				t.Fatalf("seed play sessions: %v", err)
+			}
 
 			if _, err := store.NewActivityLogStore(stores).Insert(ctx, store.ActivityLogEntry{Name: "nana is online from phone", Type: "SessionStarted", UserID: nana, DateCreated: now, Severity: "Information"}); err != nil {
 				t.Fatalf("seed activity log: %v", err)

@@ -155,6 +155,9 @@ func (e storeEnricher) Enrich(ctx context.Context, values []item.Item, options s
 		if wantSources && itemHasMediaSources(value) {
 			records := sourceRecords[value.ID]
 			sources := playback.MediaSourcesFromRecords(records)
+			if value.Kind == item.KindLiveTvChannel {
+				channelPlaceholderSources(sources)
+			}
 			switch item.MediaTypeOf(value) {
 			case item.MediaTypeAudio:
 				playback.ApplyFirstAudioStreamDefaults(sources)
@@ -487,6 +490,18 @@ func hasSubtitleStream(streams []playback.MediaStream) bool {
 		}
 	}
 	return false
+}
+
+// channelPlaceholderSources ports LiveTvChannel.GetMediaSources
+// (LiveTvChannel.cs:125-140): the placeholder source of a channel is an
+// infinite stream with the protocol of the channel URL. Every Deadfin
+// channel plays through the HTTP broker and the item stores no URL (D-100),
+// so the protocol is Http.
+func channelPlaceholderSources(sources []playback.MediaSourceInfo) {
+	for index := range sources {
+		sources[index].Protocol = playback.MediaProtocolHTTP
+		sources[index].IsInfiniteStream = sources[index].RunTimeTicks == nil
+	}
 }
 
 func dtoMediaSources(sources []playback.MediaSourceInfo) []dto.MediaSourceInfo {

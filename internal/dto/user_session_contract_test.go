@@ -140,9 +140,13 @@ func TestUserPolicyPublishesEveryPinnedWireField(t *testing.T) {
 	want := map[string]struct{}{
 		"IsAdministrator": {}, "IsHidden": {}, "EnableCollectionManagement": {}, "EnableSubtitleManagement": {}, "EnableLyricManagement": {}, "IsDisabled": {}, "MaxParentalRating": {}, "MaxParentalSubRating": {}, "BlockedTags": {}, "AllowedTags": {}, "EnableUserPreferenceAccess": {}, "AccessSchedules": {}, "BlockUnratedItems": {}, "EnableRemoteControlOfOtherUsers": {}, "EnableSharedDeviceControl": {}, "EnableRemoteAccess": {}, "EnableLiveTvManagement": {}, "EnableLiveTvAccess": {}, "EnableMediaPlayback": {}, "EnableAudioPlaybackTranscoding": {}, "EnableVideoPlaybackTranscoding": {}, "EnablePlaybackRemuxing": {}, "ForceRemoteSourceTranscoding": {}, "EnableContentDeletion": {}, "EnableContentDeletionFromFolders": {}, "EnableContentDownloading": {}, "EnableSyncTranscoding": {}, "EnableMediaConversion": {}, "EnabledDevices": {}, "EnableAllDevices": {}, "EnabledChannels": {}, "EnableAllChannels": {}, "EnabledFolders": {}, "EnableAllFolders": {}, "InvalidLoginAttemptCount": {}, "LoginAttemptsBeforeLockout": {}, "MaxActiveSessions": {}, "EnablePublicSharing": {}, "BlockedMediaFolders": {}, "BlockedChannels": {}, "RemoteClientBitrateLimit": {}, "AuthenticationProviderId": {}, "PasswordResetProviderId": {}, "SyncPlayAccess": {},
 	}
+	// Deadfin-only fields, each with its divergence row.
+	for _, name := range []string{"LimitLiveTvToSharedLists"} { // D-105
+		want[name] = struct{}{}
+	}
 	typ := reflect.TypeOf(dto.UserPolicy{})
 	if typ.NumField() != len(want) {
-		t.Fatalf("UserPolicy has %d fields, want complete %d-field wire surface", typ.NumField(), len(want))
+		t.Fatalf("UserPolicy has %d fields, want %d pinned and Deadfin fields", typ.NumField(), len(want))
 	}
 	for index := range typ.NumField() {
 		field := typ.Field(index)

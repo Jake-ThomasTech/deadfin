@@ -206,7 +206,13 @@ func renderMarkdown(l *ledger) string {
 
 	// Deferred-stubbed cohort.
 	b.WriteString("## Deferred-stubbed cohort\n\n")
-	b.WriteString("LiveTv (38 ops) and SyncPlay (22 ops) are registered as intentional stubs.\n")
+	stubbed := map[string]int{}
+	for _, op := range l.Parity.Operations {
+		if op.Status == "stubbed" {
+			stubbed[op.Subsystem]++
+		}
+	}
+	fmt.Fprintf(&b, "LiveTv (%d ops) and SyncPlay (%d ops) are registered as intentional stubs.\n", stubbed["LiveTv"], stubbed["SyncPlay"])
 	b.WriteString("They use `status: stubbed` with `disposition: deferred` per decision D2.\n\n")
 
 	// Input diagnostics.

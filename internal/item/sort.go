@@ -329,3 +329,10 @@ func containsNonASCII(value string) bool {
 	}
 	return false
 }
+
+// ParseInvariantDouble reports whether value parses as .NET
+// double.TryParse(value, CultureInfo.InvariantCulture) does, and returns the
+// number. Live TV channel numbers use it (M3uParser.cs:170-265).
+func ParseInvariantDouble(value string) (float64, bool) {
+	return parseInvariantDouble(value)
+}

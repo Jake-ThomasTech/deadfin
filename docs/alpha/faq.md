@@ -89,9 +89,9 @@ token changes at each restart while setup is pending. Treat it as a
 password. See
 [install.md](install.md#first-run-setup-and-the-setup-link).
 
-Behind a proxy, every client shows the proxy's address: Deadfin ignores
-`X-Forwarded-For` and Known Proxies. Forward WebSockets on `/socket`, and do
-not buffer `/Videos/` and `/Audio/`. See
+To see each client's own address behind a proxy, list the proxy in Known
+Proxies: Deadfin then reads `X-Forwarded-For` from it. Forward WebSockets on
+`/socket`, and do not buffer `/Videos/` and `/Audio/`. See
 [install.md](install.md#reverse-proxy).
 
 ## Which clients work?

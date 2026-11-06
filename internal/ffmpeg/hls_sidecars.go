@@ -73,6 +73,7 @@ func (manager *TranscodeManager) startHLSSidecarsLocked(job *transcodeJob, stder
 				Exited:                   job.state == transcodeExited,
 				DownloadPositionTicks:    job.downloadPositionTicks,
 				TranscodingPositionTicks: job.positionTicks,
+				StartTimeTicks:           job.hls.startTimeTicks,
 				BytesDownloaded:          job.bytesDownloaded,
 			}
 			if job.hasBytesTranscoded {

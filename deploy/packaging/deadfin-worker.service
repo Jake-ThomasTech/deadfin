@@ -1,0 +1,35 @@
+[Unit]
+Description=Deadfin transcode worker
+Documentation=https://github.com/deadfin-org/deadfin/blob/master/docs/transcode-workers.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=deadfin-worker
+Group=deadfin-worker
+# preinstall adds the user to the render and video groups that exist.
+EnvironmentFile=/etc/deadfin/worker.env
+# DEADFIN_WORKER_SERVER and DEADFIN_WORKER_TOKEN come from worker.env;
+# DEADFIN_WORKER_ARGS holds the other flags.
+ExecStart=/usr/bin/deadfin worker -state-dir=/var/lib/deadfin-worker -work-dir=/var/cache/deadfin-worker -ffmpeg=/usr/lib/jellyfin-ffmpeg/ffmpeg $DEADFIN_WORKER_ARGS
+# SIGTERM drains: the server hands each job off, then the worker stops.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+StateDirectory=deadfin-worker
+StateDirectoryMode=0750
+CacheDirectory=deadfin-worker
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

@@ -36,6 +36,16 @@ type Route struct {
 	// credential leaves the request anonymous. Upstream resolves claims on
 	// every request, so an anonymous action can still read User.GetUserId().
 	OptionalIdentity bool `json:"OptionalIdentity,omitempty"`
+	// Worker marks a transcode-worker route (/deadfin/v1/workers/, #614).
+	// The route authenticates the worker itself: the control handshake
+	// proves a join token and the data plane checks a per-job bearer token.
+	// User tokens and API keys are never resolved on it, so they authorize
+	// nothing there, and a worker credential is unknown to every other route.
+	Worker bool `json:"Worker,omitempty"`
+	// ScalingCredential also admits a transcode scaling token (#617) on a
+	// read-only route, so a metrics scraper or an autoscaler needs no
+	// administrator credential. Any other request meets Policy.
+	ScalingCredential bool `json:"ScalingCredential,omitempty"`
 }
 
 // RouteWrapper applies behavior to an individual registered route using its

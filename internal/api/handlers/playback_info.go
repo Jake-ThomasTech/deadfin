@@ -19,6 +19,7 @@ import (
 	"github.com/deadfin-org/deadfin/internal/api/router"
 	"github.com/deadfin-org/deadfin/internal/auth"
 	"github.com/deadfin-org/deadfin/internal/dto"
+	"github.com/deadfin-org/deadfin/internal/edge"
 	"github.com/deadfin-org/deadfin/internal/playback"
 	"github.com/deadfin-org/deadfin/internal/store"
 )
@@ -29,10 +30,40 @@ import (
 // When grants is supplied, every PlaySessionId that PlaybackInfo issues for a
 // user becomes a direct-stream credential for that item (D-54).
 func RegisterPlaybackInfo(rt *router.Router, service playback.PlaybackInfoService, users ItemUserResolver, grants ...PlaySessionIssuer) {
-	h := playbackInfoHandler{service: service, users: users}
+	var issuer PlaySessionIssuer
 	if len(grants) != 0 {
-		h.grants = grants[0]
+		issuer = grants[0]
 	}
+	RegisterPlaybackInfoWithOptions(rt, service, users, PlaybackInfoOptions{Grants: issuer})
+}
+
+// RegisterPlaybackInfoWithEdge is RegisterPlaybackInfo with the stream edge
+// (#621): when edge is not nil, a successful PlaybackInfo response carries
+// the direct grants of its sources in the edge.DirectHeader header.
+func RegisterPlaybackInfoWithEdge(rt *router.Router, service playback.PlaybackInfoService, users ItemUserResolver, grants PlaySessionIssuer, edge PlaybackInfoEdge) {
+	RegisterPlaybackInfoWithOptions(rt, service, users, PlaybackInfoOptions{Grants: grants, Edge: edge})
+}
+
+// PlaybackInfoOptions are the optional collaborators of the PlaybackInfo
+// routes. Each nil field is off.
+type PlaybackInfoOptions struct {
+	Grants PlaySessionIssuer
+	Edge   PlaybackInfoEdge
+	// Warmup learns of each response that announces a transcode (#623).
+	Warmup PlaybackInfoWarmup
+}
+
+// PlaybackInfoWarmup is told the PlaySessionId of a PlaybackInfo response
+// with a TranscodingUrl, so that an outside scaler can start a worker before
+// the client asks for the stream (#623).
+type PlaybackInfoWarmup interface {
+	Anticipate(playSessionID string)
+}
+
+// RegisterPlaybackInfoWithOptions is RegisterPlaybackInfo with all optional
+// collaborators.
+func RegisterPlaybackInfoWithOptions(rt *router.Router, service playback.PlaybackInfoService, users ItemUserResolver, options PlaybackInfoOptions) {
+	h := playbackInfoHandler{service: service, users: users, grants: options.Grants, edge: options.Edge, warmup: options.Warmup}
 	rt.Handle(http.MethodGet, "/Items/{itemId}/PlaybackInfo", router.Route{OperationID: "GetPlaybackInfo", Policy: string(auth.PolicyDefaultAuthorization)}, h.getPlaybackInfo)
 	rt.Handle(http.MethodPost, "/Items/{itemId}/PlaybackInfo", router.Route{OperationID: "GetPostedPlaybackInfo", Policy: string(auth.PolicyDefaultAuthorization)}, h.postPlaybackInfo)
 	rt.Handle(http.MethodPost, "/LiveStreams/Open", router.Route{OperationID: "OpenLiveStream", Policy: string(auth.PolicyDefaultAuthorization)}, h.openLiveStream)
@@ -44,6 +75,15 @@ type playbackInfoHandler struct {
 	service playback.PlaybackInfoService
 	users   ItemUserResolver
 	grants  PlaySessionIssuer
+	edge    PlaybackInfoEdge
+	warmup  PlaybackInfoWarmup
+}
+
+// PlaybackInfoEdge signs the stream edge grants of the static sources of a
+// PlaybackInfo response (#621). playSessionID is empty when the caller has
+// no user; such grants are not PlaySessionId credentials.
+type PlaybackInfoEdge interface {
+	DirectGrants(itemID dto.UUID, playSessionID string, sources []playback.MediaSourceInfo) []string
 }
 
 // PlaySessionIssuer records a PlaySessionId grant (D-54).
@@ -54,6 +94,33 @@ type PlaySessionIssuer interface {
 // issueGrant lets the PlaySessionId of a successful user PlaybackInfo stream
 // the returned sources of itemID. An API key without a selected user issues
 // no grant; such a caller sends its key on the stream URL.
+// edgeGrants adds the stream edge grants of response to w.
+func (h playbackInfoHandler) edgeGrants(w http.ResponseWriter, itemID dto.UUID, request playback.PlaybackInfoRequest, response playback.PlaybackInfoResponse) {
+	if h.edge == nil || response.ErrorCode != "" {
+		return
+	}
+	playSessionID := response.PlaySessionID
+	if request.UserID.IsNil() {
+		playSessionID = ""
+	}
+	for _, token := range h.edge.DirectGrants(itemID, playSessionID, response.MediaSources) {
+		w.Header().Add(edge.DirectHeader, token)
+	}
+}
+
+// announce tells the warm-up of a response that announces a transcode.
+func (h playbackInfoHandler) announce(response playback.PlaybackInfoResponse) {
+	if h.warmup == nil || response.ErrorCode != "" || response.PlaySessionID == "" {
+		return
+	}
+	for _, source := range response.MediaSources {
+		if source.TranscodingURL != "" {
+			h.warmup.Anticipate(response.PlaySessionID)
+			return
+		}
+	}
+}
+
 func (h playbackInfoHandler) issueGrant(itemID dto.UUID, request playback.PlaybackInfoRequest, response playback.PlaybackInfoResponse) {
 	if h.grants == nil || response.ErrorCode != "" || response.PlaySessionID == "" || request.UserID.IsNil() {
 		return
@@ -150,6 +217,8 @@ func (h playbackInfoHandler) getPlaybackInfo(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	h.issueGrant(itemID, request, response)
+	h.edgeGrants(w, itemID, request, response)
+	h.announce(response)
 	_ = render.JSON(w, r, http.StatusOK, response)
 }
 
@@ -181,6 +250,8 @@ func (h playbackInfoHandler) postPlaybackInfo(w http.ResponseWriter, r *http.Req
 		return
 	}
 	h.issueGrant(itemID, request, response)
+	h.edgeGrants(w, itemID, request, response)
+	h.announce(response)
 	_ = render.JSON(w, r, http.StatusOK, response)
 }
 
@@ -196,10 +267,15 @@ func (h playbackInfoHandler) openLiveStream(w http.ResponseWriter, r *http.Reque
 	} else if h.users != nil {
 		request.UserID = user.ID
 	}
+	if identity, ok := middleware.IdentityFromContext(r.Context()); ok {
+		request.DeviceID = identity.DeviceID
+	}
 	response, err := h.service.OpenLiveStream(r.Context(), request)
 	if err != nil {
 		if errors.Is(err, playback.ErrLiveStreamUnavailable) {
 			liveStreamUnavailable(w)
+		} else if errors.Is(err, playback.ErrItemNotFound) {
+			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		} else {
 			internalError(w)
 		}

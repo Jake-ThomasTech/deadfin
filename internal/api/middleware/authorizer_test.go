@@ -176,6 +176,28 @@ func TestAuthorizerOptionalIdentityOnAnonymousRoutes(t *testing.T) {
 	}
 }
 
+// A transcode-worker route never resolves a user credential: the worker
+// route authenticates itself, so a user token installs no identity there and
+// reaches no policy (#614).
+func TestAuthorizerLeavesWorkerRoutesToTheirOwnCredential(t *testing.T) {
+	resolver := &fakeResolver{identity: auth.Identity{Authenticated: true, UserID: middlewareTestUserID, Token: "user-token"}}
+	evaluator := &fakeEvaluator{decision: auth.DecisionAllowed}
+	authorizer := middleware.NewAuthorizer(resolver, evaluator, &fakeUsers{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if identity, found := middleware.IdentityFromContext(request.Context()); found {
+			t.Errorf("worker route received identity %+v", identity)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/deadfin/v1/workers/connect", nil)
+	request.Header.Set("Authorization", `MediaBrowser Token="user-token"`)
+	recorder := httptest.NewRecorder()
+	authorizer.Wrap(router.Route{Worker: true}, handler).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent || resolver.calls != 0 || evaluator.calls != 0 {
+		t.Fatalf("status %d, resolver calls %d, evaluator calls %d; want 204, 0, 0", recorder.Code, resolver.calls, evaluator.calls)
+	}
+}
+
 // Authorized browsing refreshes the existing session selected by the full
 // Client+DeviceId identity. A physical device may have another active client,
 // whose activity and request metadata must remain untouched.

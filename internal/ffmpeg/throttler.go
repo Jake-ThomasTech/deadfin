@@ -16,8 +16,11 @@ type throttlerState struct {
 	Exited                   bool
 	DownloadPositionTicks    int64
 	TranscodingPositionTicks int64
-	BytesDownloaded          int64
-	BytesTranscoded          *int64
+	// StartTimeTicks is the source position where the ffmpeg family started.
+	// A seek restarts the family there.
+	StartTimeTicks  int64
+	BytesDownloaded int64
+	BytesTranscoded *int64
 }
 
 type throttlerOptions struct {
@@ -97,7 +100,15 @@ func (throttler *transcodingThrottler) timeShouldPause(state throttlerState) boo
 		return state.TranscodingPositionTicks-state.DownloadPositionTicks >= thresholdTicks
 	}
 	if state.DownloadPositionTicks == 0 && state.BytesDownloaded == 0 && state.TranscodingPositionTicks > 0 {
-		return state.TranscodingPositionTicks >= thresholdTicks
+		// No segment is downloaded yet, so measure the lead from the family
+		// start. After a seek the absolute position is far past the threshold
+		// before the requested segment is complete; a pause there wedges the
+		// waiting client (#858).
+		lead := state.TranscodingPositionTicks - state.StartTimeTicks
+		if segmentLength := throttler.options.SegmentLengthTicks; segmentLength > 0 && lead < 2*segmentLength {
+			return false
+		}
+		return lead >= thresholdTicks
 	}
 
 	if state.BytesDownloaded <= 0 || state.TranscodingPositionTicks <= 0 {

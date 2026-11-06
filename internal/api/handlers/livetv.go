@@ -8,28 +8,25 @@ import (
 	"github.com/deadfin-org/deadfin/internal/api/render"
 	"github.com/deadfin-org/deadfin/internal/api/router"
 	"github.com/deadfin-org/deadfin/internal/auth"
+	"github.com/deadfin-org/deadfin/internal/config"
 	"github.com/deadfin-org/deadfin/internal/dto"
 )
 
-// RegisterLiveTv registers the deferred LiveTv surface. D2 keeps LiveTv
-// disabled, so the handlers publish empty capability and collection shapes.
-func RegisterLiveTv(rt *router.Router) {
+// RegisterLiveTv registers the LiveTv surface. admin serves the tuner,
+// listing provider and channel mapping administration; reads serve the
+// channel and programme routes. The recording and timer routes report that
+// Deadfin has no DVR until recording lands (#541, #714).
+func RegisterLiveTv(rt *router.Router, admin LiveTvAdmin, reads LiveTvReads) {
 	h := liveTvStub{}
 	access := string(auth.PolicyLiveTVAccess)
 	manage := string(auth.PolicyLiveTVManagement)
 	elevated := string(auth.PolicyRequiresElevation)
-
-	rt.Handle(http.MethodGet, "/LiveTv/Info", router.Route{OperationID: "GetLiveTvInfo", Policy: access}, h.info)
 
 	for _, route := range []struct {
 		method      string
 		pattern     string
 		operationID string
 	}{
-		{http.MethodGet, "/LiveTv/Channels", "GetLiveTvChannels"},
-		{http.MethodGet, "/LiveTv/Programs", "GetLiveTvPrograms"},
-		{http.MethodPost, "/LiveTv/Programs", "GetPrograms"},
-		{http.MethodGet, "/LiveTv/Programs/Recommended", "GetRecommendedPrograms"},
 		{http.MethodGet, "/LiveTv/Recordings", "GetRecordings"},
 		{http.MethodGet, "/LiveTv/Recordings/Folders", "GetRecordingFolders"},
 		{http.MethodGet, "/LiveTv/SeriesTimers", "GetSeriesTimers"},
@@ -43,27 +40,19 @@ func RegisterLiveTv(rt *router.Router) {
 		operationID string
 		policy      string
 	}{
-		{"/LiveTv/ListingProviders/Lineups", "GetLineups", access},
-		{"/LiveTv/TunerHosts/Types", "GetTunerHostTypes", access},
 		{"/LiveTv/Tuners/Discover", "DiscoverTuners", elevated},
 		{"/LiveTv/Tuners/Discvover", "DiscvoverTuners", elevated},
 	} {
 		rt.Handle(http.MethodGet, route.pattern, router.Route{OperationID: route.operationID, Policy: route.policy}, h.emptyArray)
 	}
 
-	rt.Handle(http.MethodGet, "/LiveTv/GuideInfo", router.Route{OperationID: "GetGuideInfo", Policy: access}, h.emptyObject)
-	rt.Handle(http.MethodGet, "/LiveTv/ListingProviders/Default", router.Route{OperationID: "GetDefaultListingProvider", Policy: access}, h.emptyObject)
+	rt.Handle(http.MethodGet, "/LiveTv/ListingProviders/Default", router.Route{OperationID: "GetDefaultListingProvider", Policy: access}, h.defaultListingProvider)
 	rt.Handle(http.MethodGet, "/LiveTv/Timers/{timerId}", router.Route{OperationID: "GetTimer", Policy: access}, h.emptyObject)
 	rt.Handle(http.MethodGet, "/LiveTv/Timers/Defaults", router.Route{OperationID: "GetDefaultTimer", Policy: access}, h.emptyObject)
 	rt.Handle(http.MethodGet, "/LiveTv/ListingProviders/SchedulesDirect/Countries", router.Route{OperationID: "GetSchedulesDirectCountries", Policy: elevated}, h.emptyObject)
-	rt.Handle(http.MethodGet, "/LiveTv/ChannelMappingOptions", router.Route{OperationID: "GetChannelMappingOptions", Policy: elevated}, h.channelMappingOptions)
 
-	// These administrative creates have only a documented 200 response. An
-	// empty object is valid for each optional-property response DTO and avoids
-	// inventing a configured provider, tuner, or mapping.
-	rt.Handle(http.MethodPost, "/LiveTv/ListingProviders", router.Route{OperationID: "AddListingProvider", Policy: elevated}, h.emptyObject)
-	rt.Handle(http.MethodPost, "/LiveTv/TunerHosts", router.Route{OperationID: "AddTunerHost", Policy: elevated}, h.emptyObject)
-	rt.Handle(http.MethodPost, "/LiveTv/ChannelMappings", router.Route{OperationID: "SetChannelMapping", Policy: elevated}, h.emptyObject)
+	registerLiveTvAdmin(rt, admin, access, elevated)
+	registerLiveTvReads(rt, reads, access)
 
 	// A 404 is observable on these OpenAPI operations. Report the deferred
 	// no-tuner state instead of pretending that an item or stream exists.
@@ -74,13 +63,10 @@ func RegisterLiveTv(rt *router.Router) {
 		policy      string
 		anonymous   bool
 	}{
-		{http.MethodGet, "/LiveTv/Channels/{channelId}", "GetChannel", access, false},
-		{http.MethodGet, "/LiveTv/Programs/{programId}", "GetProgram", access, false},
 		{http.MethodGet, "/LiveTv/Recordings/{recordingId}", "GetRecording", access, false},
 		{http.MethodDelete, "/LiveTv/Recordings/{recordingId}", "DeleteRecording", manage, false},
 		{http.MethodGet, "/LiveTv/SeriesTimers/{timerId}", "GetSeriesTimer", access, false},
 		{http.MethodGet, "/LiveTv/LiveRecordings/{recordingId}/stream", "GetLiveRecordingFile", "", true},
-		{http.MethodGet, "/LiveTv/LiveStreamFiles/{streamId}/stream.{container}", "GetLiveStreamFile", "", true},
 	} {
 		rt.Handle(route.method, route.pattern, router.Route{
 			OperationID: route.operationID,
@@ -89,26 +75,27 @@ func RegisterLiveTv(rt *router.Router) {
 		}, h.notConfigured)
 	}
 
-	// These mutations expose only 204 in the pinned spec. Keep their documented
-	// empty-success shape; returning an undocumented 404 would break clients.
+	// Deadfin has no DVR, so no timer exists and none can be stored (D-122).
+	// Upstream reports an unknown timer with ResourceNotFoundException, a 404,
+	// and a refused recording with ArgumentException, a 400. Report the same
+	// errors instead of a 204 that tells a client a recording is scheduled.
 	for _, route := range []struct {
 		method      string
 		pattern     string
 		operationID string
-		policy      string
+		handler     http.HandlerFunc
 	}{
-		{http.MethodDelete, "/LiveTv/ListingProviders", "DeleteListingProvider", elevated},
-		{http.MethodPost, "/LiveTv/SeriesTimers", "CreateSeriesTimer", manage},
-		{http.MethodDelete, "/LiveTv/SeriesTimers/{timerId}", "CancelSeriesTimer", manage},
-		{http.MethodPost, "/LiveTv/SeriesTimers/{timerId}", "UpdateSeriesTimer", manage},
-		{http.MethodPost, "/LiveTv/Timers", "CreateTimer", manage},
-		{http.MethodDelete, "/LiveTv/Timers/{timerId}", "CancelTimer", manage},
-		{http.MethodPost, "/LiveTv/Timers/{timerId}", "UpdateTimer", manage},
-		{http.MethodDelete, "/LiveTv/TunerHosts", "DeleteTunerHost", elevated},
-		{http.MethodPost, "/LiveTv/Tuners/{tunerId}/Reset", "ResetTuner", elevated},
+		{http.MethodPost, "/LiveTv/SeriesTimers", "CreateSeriesTimer", h.noDvr},
+		{http.MethodDelete, "/LiveTv/SeriesTimers/{timerId}", "CancelSeriesTimer", h.timerNotFound},
+		{http.MethodPost, "/LiveTv/SeriesTimers/{timerId}", "UpdateSeriesTimer", h.timerNotFound},
+		{http.MethodPost, "/LiveTv/Timers", "CreateTimer", h.noDvr},
+		{http.MethodDelete, "/LiveTv/Timers/{timerId}", "CancelTimer", h.timerNotFound},
+		{http.MethodPost, "/LiveTv/Timers/{timerId}", "UpdateTimer", h.timerNotFound},
 	} {
-		rt.Handle(route.method, route.pattern, router.Route{OperationID: route.operationID, Policy: route.policy}, h.noContent)
+		rt.Handle(route.method, route.pattern, router.Route{OperationID: route.operationID, Policy: manage}, route.handler)
 	}
+
+	rt.Handle(http.MethodPost, "/LiveTv/Tuners/{tunerId}/Reset", router.Route{OperationID: "ResetTuner", Policy: elevated}, h.noContent)
 }
 
 type liveTvStub struct{}
@@ -117,12 +104,6 @@ type liveTvInfo struct {
 	Services     []struct{} `json:"Services"`
 	IsEnabled    bool       `json:"IsEnabled"`
 	EnabledUsers []string   `json:"EnabledUsers"`
-}
-
-type channelMappingOptions struct {
-	TunerChannels    []struct{} `json:"TunerChannels"`
-	ProviderChannels []struct{} `json:"ProviderChannels"`
-	Mappings         []struct{} `json:"Mappings"`
 }
 
 type deferredProblem struct {
@@ -150,12 +131,10 @@ func (liveTvStub) emptyObject(w http.ResponseWriter, r *http.Request) {
 	_ = render.JSON(w, r, http.StatusOK, struct{}{})
 }
 
-func (liveTvStub) channelMappingOptions(w http.ResponseWriter, r *http.Request) {
-	_ = render.JSON(w, r, http.StatusOK, channelMappingOptions{
-		TunerChannels:    []struct{}{},
-		ProviderChannels: []struct{}{},
-		Mappings:         []struct{}{},
-	})
+// defaultListingProvider ports GetDefaultListingProvider: a new
+// ListingsProviderInfo with its constructor defaults.
+func (liveTvStub) defaultListingProvider(w http.ResponseWriter, r *http.Request) {
+	_ = render.JSON(w, r, http.StatusOK, config.DefaultListingsProviderInfo())
 }
 
 func (liveTvStub) notConfigured(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +143,24 @@ func (liveTvStub) notConfigured(w http.ResponseWriter, r *http.Request) {
 		Status: http.StatusNotFound,
 		Detail: "no tuners configured",
 	})
+}
+
+// noDvr refuses a new timer as upstream's exception middleware reports an
+// ArgumentException: 400 with its production text body.
+func (liveTvStub) noDvr(w http.ResponseWriter, _ *http.Request) {
+	writeLiveTvTimerError(w, http.StatusBadRequest)
+}
+
+// timerNotFound reports an unknown timer as upstream's exception middleware
+// reports a ResourceNotFoundException: 404 with its production text body.
+func (liveTvStub) timerNotFound(w http.ResponseWriter, _ *http.Request) {
+	writeLiveTvTimerError(w, http.StatusNotFound)
+}
+
+func writeLiveTvTimerError(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte("Error processing request."))
 }
 
 func (liveTvStub) noContent(w http.ResponseWriter, _ *http.Request) {

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -75,7 +76,20 @@ func (d corpusDownloader) Fetch(_ context.Context, _ string) ([]byte, error) {
 // TestImageServingAcceptance drives the real libvips processor through the HTTP
 // image routes. It owns the single process-lifetime image runtime and shares one
 // processor across every subtest, mirroring internal/images' TestNativeProcessor.
+// libvips shutdown is terminal for a process, so each run of the test opens the
+// runtime in a fresh child process; -count=N runs N children (#666).
 func TestImageServingAcceptance(t *testing.T) {
+	const childEnvironment = "DEADFIN_TEST_IMAGE_SERVING_CHILD"
+	if os.Getenv(childEnvironment) != "1" {
+		command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestImageServingAcceptance$", "-test.v", "-test.count=1")
+		command.Env = append(os.Environ(), childEnvironment+"=1")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("image serving child: %v\n%s", err, output)
+		}
+		t.Logf("image serving child:\n%s", output)
+		return
+	}
 	imageRuntime, err := images.OpenRuntime(context.Background())
 	if err != nil {
 		t.Fatalf("open image runtime: %v", err)

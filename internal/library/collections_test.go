@@ -399,3 +399,74 @@ func TestScanResolvesBoxSetTmdbIDFromMembers(t *testing.T) {
 		t.Errorf("stored Tmdb id = %q, want 87118", got)
 	}
 }
+
+// TestScanReplacesBoxSetMovieTmdbID proves that a scan corrects a BoxSet
+// whose Tmdb ID is a member's movie ID (deadfin#846). With members that
+// carry a TmdbCollection ID, the BoxSet takes it; without one, the movie ID
+// is removed, so the provider searches by name. A member TmdbCollection ID
+// that is the member's own movie ID is not used, and a BoxSet Tmdb ID that
+// is no member's movie ID stays.
+func TestScanReplacesBoxSetMovieTmdbID(t *testing.T) {
+	recorder := &boxSetTmdbRecorder{seen: map[string]string{}}
+	h := newCollectionsHarnessWith(t, false, recorder)
+	setIDs := func(name, movieID, collectionID string) {
+		movie, err := h.items.Get(t.Context(), h.movies[name].ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		movie.ProviderIDs.Set("Tmdb", movieID)
+		if collectionID != "" {
+			movie.ProviderIDs.Set("TmdbCollection", collectionID)
+		}
+		if err := h.items.Upsert(t.Context(), movie); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setIDs("Alpha", "24", "2883")
+	setIDs("Bravo", "393", "2883")
+	setIDs("Charlie", "170", "170")
+	collection := func(name, tmdbID string, members ...string) dto.UUID {
+		created, err := h.scanner.CreateCollection(t.Context(), name, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		created.ProviderIDs.Set("Tmdb", tmdbID)
+		if err := h.items.Upsert(t.Context(), created); err != nil {
+			t.Fatal(err)
+		}
+		ids := make([]dto.UUID, 0, len(members))
+		for _, member := range members {
+			ids = append(ids, h.movies[member].ID)
+		}
+		if err := h.items.AddToCollection(t.Context(), created.ID, ids); err != nil {
+			t.Fatal(err)
+		}
+		return created.ID
+	}
+	killBill := collection("Kill Bill Collection", "24", "Alpha", "Bravo")
+	days := collection("28 Days Later Collection", "170", "Charlie")
+	kept := collection("Kept Collection", "1565", "Charlie")
+
+	h.scan(t)
+	for name, want := range map[string]string{"Kill Bill Collection": "2883", "28 Days Later Collection": "", "Kept Collection": "1565"} {
+		if got := recorder.seen[name]; got != want {
+			t.Errorf("refresher saw %s Tmdb id %q, want %q", name, got, want)
+		}
+	}
+	for id, want := range map[dto.UUID]string{killBill: "2883", kept: "1565"} {
+		stored, err := h.items.Get(t.Context(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := stored.ProviderIDs.Get("Tmdb"); got != want {
+			t.Errorf("stored Tmdb id of %s = %q, want %q", id, got, want)
+		}
+	}
+	stored, err := h.items.Get(t.Context(), days)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, found := stored.ProviderIDs.Get("Tmdb"); found {
+		t.Errorf("stored Tmdb id of 28 Days Later Collection = %q, want none", got)
+	}
+}

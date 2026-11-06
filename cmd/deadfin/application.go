@@ -47,6 +47,7 @@ import (
 	"github.com/deadfin-org/deadfin/internal/itemedit"
 	"github.com/deadfin-org/deadfin/internal/keyframes"
 	"github.com/deadfin-org/deadfin/internal/library"
+	"github.com/deadfin-org/deadfin/internal/livetv/stream"
 	"github.com/deadfin-org/deadfin/internal/localization"
 	"github.com/deadfin-org/deadfin/internal/naming"
 	"github.com/deadfin-org/deadfin/internal/path"
@@ -61,6 +62,7 @@ import (
 	"github.com/deadfin-org/deadfin/internal/providers/musicbrainz"
 	"github.com/deadfin-org/deadfin/internal/providers/remote"
 	"github.com/deadfin-org/deadfin/internal/providers/tmdb"
+	"github.com/deadfin-org/deadfin/internal/replica"
 	"github.com/deadfin-org/deadfin/internal/session"
 	"github.com/deadfin-org/deadfin/internal/sessioncontrol"
 	"github.com/deadfin-org/deadfin/internal/sessiondto"
@@ -70,6 +72,7 @@ import (
 	"github.com/deadfin-org/deadfin/internal/subtitleedit"
 	"github.com/deadfin-org/deadfin/internal/subtitles"
 	"github.com/deadfin-org/deadfin/internal/tasks"
+	"github.com/deadfin-org/deadfin/internal/transcodeworker"
 	"github.com/deadfin-org/deadfin/internal/trickplay"
 	"github.com/deadfin-org/deadfin/internal/user"
 	"github.com/deadfin-org/deadfin/internal/ws"
@@ -95,6 +98,7 @@ func audioDbRemoteConfig(source clock.Clock) remote.Config {
 // Deadfin process. The command constructs it once, then closes it after the
 // HTTP server has stopped accepting requests.
 type application struct {
+	liveStreams          *stream.Broker
 	libraryChanges       *library.ChangeQueue
 	router               *router.Router
 	manager              *config.Manager
@@ -109,9 +113,11 @@ type application struct {
 	topology             *library.Topology
 	scanner              *library.Scanner
 	sessions             *session.Manager
+	playSessions         *session.Persister
 	webSockets           *ws.Server
 	listenScrobbler      *listenbrainz.Scrobbler
 	transcodes           *ffmpeg.TranscodeManager
+	transcodeWorkers     *transcodeworker.Hub
 	keyframes            *lazyKeyframeSource
 	progressive          playback.ProgressiveVideoStreamer
 	hls                  playback.HLSVideoStreamer
@@ -123,6 +129,10 @@ type application struct {
 	configuration        *configurationConsumer
 	transcodeEncoding    playback.TranscodeEncoding
 	closeTransition      atomic.Pointer[applicationCloseTransition]
+	// replicas is the replica state in replica mode (#652); nil otherwise.
+	replicas       *replicaMode
+	replicaDrainMu sync.Mutex
+	replicaDrained bool
 }
 
 // applicationCloseTransition is an instance-owned, context-selectable close
@@ -162,10 +172,12 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 	var topology *library.Topology
 	var scanner *library.Scanner
 	var sessions *session.Manager
+	var playSessions *session.Persister
 	var webSockets *ws.Server
 	var playstateService *playstate.Service
 	var listenScrobbler *listenbrainz.Scrobbler
 	var transcodes *ffmpeg.TranscodeManager
+	var transcodeWorkers *transcodeworker.Hub
 	var trickplayRunner *tasks.TrickplayRunner
 	var trickplayReader *trickplay.ReaderService
 	var trickplayGenerator *trickplay.Generator
@@ -173,9 +185,13 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 	var lazyKeyframes *lazyKeyframeSource
 	var deviceActivity *user.DeviceActivity
 	var configurationApplier *configurationConsumer
+	var replicas *replicaMode
 	defer func() {
 		if err == nil {
 			return
+		}
+		if replicas != nil {
+			replicas.close()
 		}
 		if configurationApplier != nil {
 			err = errors.Join(err, configurationApplier.Close(context.Background()))
@@ -198,11 +214,17 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		if transcodes != nil {
 			err = errors.Join(err, transcodes.Close(context.Background()))
 		}
+		if transcodeWorkers != nil {
+			err = errors.Join(err, transcodeWorkers.Close(context.Background()))
+		}
 		if lazyKeyframes != nil {
 			err = errors.Join(err, lazyKeyframes.Close(context.Background()))
 		}
 		if deviceActivity != nil {
 			err = errors.Join(err, deviceActivity.Close(context.Background()))
+		}
+		if playSessions != nil {
+			err = errors.Join(err, playSessions.Close(context.Background()))
 		}
 		if webSockets != nil {
 			err = errors.Join(err, webSockets.Close(context.Background()))
@@ -266,6 +288,17 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		return nil, fmt.Errorf("open application database (%s): %w", selectedDatabase, err)
 	}
 	log.Printf("application: store %s", selectedDatabase)
+	replicaURL := appConfig.replicaURL
+	if replicaURL == "" {
+		if replicaURL, err = replicaEnvironment(os.Getenv); err != nil {
+			return nil, err
+		}
+	}
+	if replicaURL != "" {
+		if replicas, err = startReplicaMode(ctx, realClock, stores, selectedDatabase.postgresDSN != "", appConfig.replicaOnSQLite, replicaURL, slog.Default()); err != nil {
+			return nil, err
+		}
+	}
 
 	activity = activitylog.NewWithStore(realClock, store.NewActivityLogStore(stores), slog.Default())
 	identity := store.NewIdentity(stores)
@@ -357,10 +390,14 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 	})
 	tmdbLookup := tmdb.NewLookupProvider(tmdb.Options{HTTP: remoteHTTP, Config: tmdbConfig})
 	musicbrainzLookup := musicbrainz.NewLookupProvider(musicbrainz.Options{HTTP: musicBrainzHTTP, Config: musicBrainzConfig})
+	imageListers := []providers.ImageLister{tmdbLookup, audioDbProvider}
 	lookupRegistry := providers.NewLookupRegistry(
 		[]providers.Searcher{tmdbLookup, musicbrainzLookup},
-		[]providers.ImageLister{tmdbLookup, audioDbProvider},
+		imageListers,
 	)
+	// The image fetchers also fill missing images on a refresh
+	// (ItemImageProvider.RefreshImages).
+	refresher = refresher.WithImageListers(imageListers...)
 	virtualPaths := path.NewVirtualPathExpander(paths.Data, paths.Metadata)
 	items := store.NewItemStore(stores)
 	if err := os.MkdirAll(filepath.Join(paths.Root, "root", "default"), 0o700); err != nil {
@@ -416,7 +453,7 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 	if err != nil {
 		return nil, fmt.Errorf("open localization service: %w", err)
 	}
-	itemBuilder := dtobuild.NewBuilder(items, dtobuild.NewStoreEnricher(items, users, localizationService), identityConfig.ID.String()).WithPaths(virtualPaths)
+	itemBuilder := dtobuild.NewBuilder(items, dtobuild.NewStoreEnricher(items, users, localizationService), identityConfig.ID.String()).WithPaths(virtualPaths).WithClock(realClock)
 	views := library.NewViews(items, users)
 	playlistService, err := playlists.New(playlists.Options{Items: items, Users: users, Clock: realClock, ProgramData: paths.Root, DataPath: paths.Data})
 	if err != nil {
@@ -457,10 +494,67 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		},
 	})
 	playstateApplication := listenbrainz.Wrap(playstateService, listenScrobbler)
-	transcodes, err = ffmpeg.NewTranscodeManager("ffmpeg", paths.Transcodes, ffmpeg.TranscodeManagerOptions{Clock: realClock, LogDirectory: paths.Log, Logger: slog.Default(), PKeySupported: appConfig.encodingCapabilities.SupportsPKeyPause})
+	// Transcode workers (#614, #615) are enrolled through the admin API.
+	// The placement policy (#616) defaults to local: the hub places no job; with no static
+	// token and before the first join token its connect route answers 404.
+	transcodeWorkerStore := store.NewTranscodeWorkerStore(stores)
+	staticWorkerTokens, workersAllowHTTP, err := transcodeWorkerEnvironment(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	workersPlainHTTP := newTranscodeWorkerPlainHTTP(workersAllowHTTP, manager, slog.Default())
+	workerPolicy, err := transcodeWorkerPolicy(ctx, transcodeWorkerStore, os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	scalingTokens, err := transcodeScalingTokens(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	jobLease, err := transcodeJobLease(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	streamEdge, err := edgeEnvironment(os.Getenv, slog.Default())
+	if err != nil {
+		return nil, err
+	}
+	scaleHook, err := transcodeScaleHook(os.Getenv, slog.Default())
+	if err != nil {
+		return nil, err
+	}
+	// Remote jobs survive a restart (#618): the wipe keeps the families of
+	// live job records, and the hub adopts them when their workers return.
+	var jobRecords transcodeworker.JobStore
+	var keptFamilies []ffmpeg.KeptFamily
+	if jobLease > 0 {
+		jobRecords = transcodeWorkerStore
+		if keptFamilies, err = keptTranscodeFamilies(ctx, transcodeWorkerStore, realClock.Now()); err != nil {
+			return nil, fmt.Errorf("read transcode worker job records: %w", err)
+		}
+	}
+	transcodeWorkers, err = transcodeworker.NewHub(transcodeworker.HubConfig{
+		Clock:          realClock,
+		Credentials:    transcodeworker.StaticTokens(transcodeworker.StoreCredentials{Store: transcodeWorkerStore, Clock: realClock}, staticWorkerTokens),
+		AllowPlainHTTP: workersPlainHTTP.allowed,
+		Policy:         workerPolicy,
+		FFmpegMajor:    appConfig.encodingCapabilities.EncoderMajorVersion,
+		Jobs:           jobRecords,
+		Lease:          jobLease,
+		Edge:           streamEdge.hubTarget(),
+		ScaleHook:      scaleHook,
+		Replica:        replicas.id(),
+		ClaimJob:       replicas.claimJob(realClock),
+		Logger:         slog.Default(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("start transcode worker hub: %w", err)
+	}
+	transcodes, err = ffmpeg.NewTranscodeManager("ffmpeg", paths.Transcodes, ffmpeg.TranscodeManagerOptions{Clock: realClock, LogDirectory: paths.Log, Logger: slog.Default(), PKeySupported: appConfig.encodingCapabilities.SupportsPKeyPause, RemoteRunner: transcodeWorkers, KeepFamilies: keptFamilies, KeepTranscodes: replicas.sharesTranscodes()})
 	if err != nil {
 		return nil, fmt.Errorf("open progressive transcode manager: %w", err)
 	}
+	transcodeWorkers.SetAdopter(transcodes)
 	sessionProjector := sessiondto.New(users, items, itemBuilder, identityConfig.ID.String()).WithTranscoding(transcodingState{manager: transcodes})
 	webSockets = ws.New(ws.Config{
 		Clock:            realClock,
@@ -474,7 +568,19 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		UserDataChanges:  userDataChanges,
 		Activity:         activity,
 		Tasks:            scheduledTasks,
+		Relay:            replicas.relay(),
+		PeerSessions:     replicas.peerSessions(),
 	})
+	// The guide service queues Refresh Guide on the scheduler, which opens
+	// later; a configuration save happens only after startup.
+	liveTv, err := newLiveTv(manager, items, paths, realClock, func() { queueGuideRefresh(scheduler) })
+	if err != nil {
+		return nil, err
+	}
+	liveStreamBroker, liveTvMedia, err := newLiveStreams(liveTv, paths, realClock, liveStreamLocalURL(listen, manager.Network().NormalizedBaseURL()), playbackNetworkClassifier{network: network}, sessions)
+	if err != nil {
+		return nil, err
+	}
 	if err := sessions.SetOptions(session.Options{
 		InactiveSessionThreshold: func() int {
 			return manager.System().InactiveSessionThreshold
@@ -490,6 +596,7 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 				Command: "Stop", SeekPositionTicks: state.PositionTicks, ControllingUserID: &controllingUserID,
 			})
 		},
+		CloseLiveStream: liveTvMedia.CloseLiveStream,
 		OnSessionStarted: func(ctx context.Context, snapshot session.Snapshot) {
 			recordSessionActivity(ctx, activity, users, snapshot, activitylog.SessionStarted)
 		},
@@ -512,6 +619,8 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		Activity: activity,
 	})
 	playbackService := playback.NewPlaybackInfoService(playback.PlaybackInfoServiceConfig{
+		LiveStreams:    liveTvMedia,
+		LiveTv:         liveTvMedia,
 		Sources:        playbackSourceReader{items: items},
 		Access:         store.NewPlaybackItemAccessReader(items, users),
 		DeviceProfiles: playbackDeviceProfiles{sessions: sessions},
@@ -521,7 +630,9 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		Languages:      localizationService,
 		Paths:          virtualPaths,
 		Encoding:       transcodeEncoding,
+		Logger:         slog.Default(),
 	})
+
 	progressiveService := playback.NewProgressiveVideoService(playback.ProgressiveServiceConfig{
 		Sources:      playbackService,
 		TranscodeDir: paths.Transcodes,
@@ -560,7 +671,12 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		Manager:             hlsTranscodeManager{manager: transcodes},
 		Subtitles:           subtitleService,
 		Attachments:         attachmentService,
+		EdgeGrant:           streamEdge.readGrant(realClock),
+		LiveTv:              liveTvMedia,
+		Clock:               realClock,
+		Logger:              slog.Default(),
 		AudioStart:          ffmpeg.Prober{Path: applicationFFProbePath, Timeout: 30 * time.Second},
+		RemoteEncoders:      transcodeWorkers,
 	})
 	trickplayReader = trickplay.NewReaderService(trickplay.ReaderServiceConfig{
 		Metadata: trickplayMetadata,
@@ -606,6 +722,7 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 	if err != nil {
 		return nil, fmt.Errorf("open task scheduler: %w", err)
 	}
+	views.WithLiveTv(liveTv)
 	// The person refresh needs a TMDb key; without one the TMDb provider is
 	// inert and a refresh would only stamp DateLastRefreshed.
 	var peopleService *people.Service
@@ -635,6 +752,7 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		LogPath:          paths.Log,
 		CachePath:        paths.Cache,
 		TranscodePath:    paths.Transcodes,
+		Guide:            guideTask{service: liveTv},
 	}
 	// Register the RefreshMetadata extension task only in the production
 	// server (imageProcessor is injected by main.go) and in composition
@@ -701,7 +819,16 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		Logger:     identify.SlogLogger{Logger: slog.Default()},
 	})
 	playGrants := playgrant.New(realClock)
-	authorizer := middleware.NewAuthorizer(resolver, evaluator, users).WithPlaySessionGrants(playGrants)
+	var claimedSessions []string
+	restoreSessions, err := playSessionRestore(os.Getenv, replicas, streamEdge)
+	if err != nil {
+		return nil, err
+	}
+	if restoreSessions {
+		playSessions, claimedSessions = restorePlaySessions(ctx, realClock, stores, users, sessions, playGrants, replicas, slog.Default())
+	}
+	authorizer := middleware.NewAuthorizer(resolver, evaluator, users).WithPlaySessionGrants(playGrants).
+		WithScalingCredential(transcodeworker.ScalingTokens{Store: transcodeWorkerStore, Static: scalingTokens}.Check)
 	libraryChanges := library.NewChangeQueue(realClock, func() time.Duration {
 		return time.Duration(manager.System().LibraryMonitorDelay) * time.Second
 	}, refreshTriggerAdapter{scanner: scanner, scheduler: scheduler}.Trigger, slog.Default())
@@ -715,55 +842,66 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 	}
 	webClient := resolveWebClient(paths.Root, bundledWebDir)
 	logWebClient(ctx, slog.Default(), webClient)
-	setupGate, err := newSetupGate(manager, network, &knownProxies{manager: manager}, setupRandom, slog.Default())
+	proxies := &knownProxies{manager: manager}
+	setupGate, err := newSetupGate(manager, network, proxies, setupRandom, slog.Default())
 	if err != nil {
 		return nil, err
 	}
-	rt := router.New(setupGate.Wrap, middleware.NewSlowRequestDiagnostics(realClock, stores, slog.Default(), 2*time.Second).Wrap, middleware.NoCache("GetBitrateTestBytes", "GetEndpointInfo", "NATIVE:GetBuild"), authorizer.Wrap, middleware.NewSessionActivity(sessions).Wrap)
+	replicaRouting, err := replicas.newRouter(realClock, sessions, playGrants, resolver, func() bool { return manager.System().EnableLegacyAuthorization }, playSessions.Flush, claimedSessions)
+	if err != nil {
+		return nil, err
+	}
+	rt := router.New(middleware.ClientAddresses(proxies), setupGate.Wrap, middleware.NewSlowRequestDiagnostics(realClock, stores, slog.Default(), 2*time.Second).Wrap, middleware.NoCache("GetBitrateTestBytes", "GetEndpointInfo", "NATIVE:GetBuild"), replicaRouting, authorizer.Wrap, middleware.NewSessionActivity(sessions).Except(replica.IsLocalForward).Wrap)
 	registerRoutes(rt, routeServices{
-		identity:           identityConfig,
-		systemIdentity:     func() config.ServerIdentity { return configuredServerIdentity(identityConfig, manager) },
-		webSocketPort:      listenPort(listen),
-		localAddress:       listen,
-		paths:              paths,
-		webPath:            webClient.Path,
-		webComponent:       webClient.Component,
-		startup:            manager,
-		manager:            manager,
-		clock:              realClock,
-		network:            network,
-		playGrants:         playGrants,
-		transcoding:        transcodingState{manager: transcodes},
-		users:              users,
-		apiKeys:            identity,
-		localization:       localizationService,
-		refresh:            refreshTriggerAdapter{scanner: scanner, scheduler: scheduler},
-		libraryChanges:     libraryChanges,
-		topology:           topology,
-		login:              login,
-		sessions:           sessions,
-		displayPreferences: displayPreferences,
-		playback:           playbackService,
-		playstate:          playstateApplication,
-		directFiles:        playbackService,
-		progressive:        progressiveService,
-		hls:                hlsService,
-		subtitles:          subtitleService,
-		attachments:        attachmentService,
-		trickplay:          trickplayReader,
-		downloadFiles:      playbackService,
-		items:              items,
-		itemBuilder:        itemBuilder,
-		views:              views,
-		playlists:          playlistService,
-		collections:        scanner,
-		images:             imageRenderer,
-		webSockets:         webSockets,
-		virtualPaths:       virtualPaths,
-		sessionControl:     sessionController,
-		lookup:             identify.NewLookupAdapter(identifyService),
-		remoteImages:       identify.NewRemoteImagesAdapter(identifyService),
-		metadataPlugins:    providers.Catalog{Registry: refresher, ImageFetchers: []providers.ImageFetcherSource{dynamicImages}},
+		sessionPeers:         replicas.sessionPeers(),
+		sessionOwners:        replicas.sessionOwners(),
+		transcodeWorkers:     transcodeWorkers,
+		transcodeWorkerStore: transcodeWorkerStore,
+		workerPlainHTTP:      workersPlainHTTP,
+		identity:             identityConfig,
+		systemIdentity:       func() config.ServerIdentity { return configuredServerIdentity(identityConfig, manager) },
+		webSocketPort:        listenPort(listen),
+		localAddress:         listen,
+		paths:                paths,
+		webPath:              webClient.Path,
+		webComponent:         webClient.Component,
+		startup:              manager,
+		manager:              manager,
+		clock:                realClock,
+		network:              network,
+		playGrants:           playGrants,
+		playbackEdge:         streamEdge.directGrants(realClock),
+		transcoding:          transcodingState{manager: transcodes},
+		users:                users,
+		apiKeys:              identity,
+		localization:         localizationService,
+		refresh:              refreshTriggerAdapter{scanner: scanner, scheduler: scheduler},
+		libraryChanges:       libraryChanges,
+		topology:             topology,
+		login:                login,
+		sessions:             sessions,
+		displayPreferences:   displayPreferences,
+		playback:             playbackService,
+		playstate:            playstateApplication,
+		directFiles:          playbackService,
+		progressive:          progressiveService,
+		hls:                  hlsService,
+		subtitles:            subtitleService,
+		attachments:          attachmentService,
+		trickplay:            trickplayReader,
+		downloadFiles:        playbackService,
+		items:                items,
+		itemBuilder:          itemBuilder,
+		views:                views,
+		playlists:            playlistService,
+		collections:          scanner,
+		images:               imageRenderer,
+		webSockets:           webSockets,
+		virtualPaths:         virtualPaths,
+		sessionControl:       sessionController,
+		lookup:               identify.NewLookupAdapter(identifyService),
+		remoteImages:         identify.NewRemoteImagesAdapter(identifyService),
+		metadataPlugins:      providers.Catalog{Registry: refresher, ImageFetchers: []providers.ImageFetcherSource{dynamicImages}},
 		itemDeleter: itemdelete.New(itemdelete.Options{
 			Items:         items,
 			Users:         users,
@@ -795,8 +933,11 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		scheduler: scheduler,
 		activity:  activity,
 		setupGate: setupGate,
+		liveTv:    liveTv,
+		liveFiles: liveTvMedia,
 	})
 	return &application{
+		liveStreams:          liveStreamBroker,
 		libraryChanges:       libraryChanges,
 		router:               rt,
 		manager:              manager,
@@ -812,9 +953,12 @@ func newApplicationWithListen(ctx context.Context, programData, listen string, o
 		topology:             topology,
 		scanner:              scanner,
 		sessions:             sessions,
+		playSessions:         playSessions,
+		replicas:             replicas,
 		webSockets:           webSockets,
 		listenScrobbler:      listenScrobbler,
 		transcodes:           transcodes,
+		transcodeWorkers:     transcodeWorkers,
 		progressive:          progressiveService,
 		hls:                  hlsService,
 		keyframes:            lazyKeyframes,
@@ -853,6 +997,10 @@ type applicationConfig struct {
 	setupRandom          io.Reader
 	databaseURL          string
 	bundledWebDir        *string
+	// replicaURL turns on replica mode in place of DEADFIN_REPLICA_URL;
+	// replicaOnSQLite lets a test run it on one SQLite file (#652).
+	replicaURL      string
+	replicaOnSQLite bool
 }
 
 // scheduledTaskRegistration stores one task definition and its runnable for
@@ -883,6 +1031,16 @@ func withProviderRemoteDoer(doer remote.Doer) applicationOption {
 // SQLite in the program-data directory.
 func withDatabaseURL(raw string) applicationOption {
 	return func(config *applicationConfig) { config.databaseURL = raw }
+}
+
+// withReplicaURL turns on replica mode with url (#652); withReplicaOnSQLite
+// lets a test run it on one SQLite file.
+func withReplicaURL(url string) applicationOption {
+	return func(config *applicationConfig) { config.replicaURL = url }
+}
+
+func withReplicaOnSQLite() applicationOption {
+	return func(config *applicationConfig) { config.replicaOnSQLite = true }
 }
 
 // withBundledWebDir replaces defaultBundledWebDir, the web client directory
@@ -960,7 +1118,11 @@ func (adapter hlsTranscodeManager) WaitSegment(ctx context.Context, playlist str
 			ActualSegmentLengthTicks: timing.ActualSegmentLengthTicks,
 		}
 	}
-	return adapter.manager.WaitSegment(ctx, playlist, index, ffmpegTiming)
+	body, err := adapter.manager.WaitSegment(ctx, playlist, index, ffmpegTiming)
+	if errors.Is(err, ffmpeg.ErrRunnerLost) {
+		err = fmt.Errorf("%w: %w", playback.ErrHLSRunnerLost, err)
+	}
+	return body, err
 }
 
 func (adapter hlsTranscodeManager) WaitPlaylist(ctx context.Context, playlist string, minimum int) (string, error) {
@@ -999,8 +1161,16 @@ func (adapter hlsTranscodeManager) request(request playback.HLSJobRequest) ffmpe
 		SourceRevision:    request.SourceRevision, OpenSource: request.OpenSource,
 		EmbeddedSubtitleSource: request.EmbeddedSubtitleSource,
 		ExternalSubtitleSource: request.ExternalSubtitleSource, ExternalSubtitleRevision: request.ExternalSubtitleRevision,
-		OpenExternalSubtitle: request.OpenExternalSubtitle,
-		TranscodingInfo:      request.TranscodingInfo,
+		OpenExternalSubtitle: request.OpenExternalSubtitle, SubtitleFontsDir: request.SubtitleFontsDir,
+		Handoff:    request.Handoff,
+		BuildArgs:  request.BuildArgs,
+		Local:      request.Local,
+		RemoteOnly: request.RemoteOnly,
+		Facts: ffmpeg.JobFacts{
+			SourceCodec: request.Facts.SourceCodec, SourceProfile: request.Facts.SourceProfile, BitDepth: request.Facts.BitDepth,
+			HDR: request.Facts.HDR, NeedsToneMap: request.Facts.NeedsToneMap, TargetCodec: request.Facts.TargetCodec, Hardware: request.Facts.Hardware,
+		},
+		TranscodingInfo: request.TranscodingInfo,
 	}
 }
 
@@ -1760,43 +1930,10 @@ func withConfigurationApplied(applied func(config.Change)) applicationOption {
 	return func(config *applicationConfig) { config.configurationApplied = applied }
 }
 
-// encodingCapabilities projects the immutable ffmpeg and NVIDIA device
-// probes into the pure encoding facts consumed by both progressive and HLS
-// argument builders. The NVENC encoders that the device rejects, and the
-// cuda hwaccel when no device opens, are removed, so the builders select
-// only what the GPU can run (D-37).
+// encodingCapabilities projects the probes into the pure encoding facts
+// (ffmpeg.EncodingCapabilities). Transcode workers use the same projection.
 func encodingCapabilities(probed ffmpeg.Capabilities, nvidia ffmpeg.NvidiaCapabilities) encoding.Capabilities {
-	capabilities := encoding.Capabilities{
-		EncoderMajorVersion:            probed.Version.Major,
-		EncoderMinorVersion:            probed.Version.Minor,
-		EncoderPatchVersion:            probed.Version.Patch,
-		SupportsSubtitleExtraction:     containsCapability(probed.Filters, "subtitles"),
-		SupportsTonemapX:               containsCapability(probed.Filters, "tonemapx"),
-		SupportsOverlayCudaAlphaFormat: nvidia.OverlayCudaAlphaFormat,
-		SupportsPKeyPause:              probed.PKeyPause,
-		Decoders:                       append([]string(nil), probed.Decoders...),
-		Filters:                        append([]string(nil), probed.Filters...),
-		BSFOptions:                     append([]string(nil), probed.BSFOptions...),
-	}
-	for _, name := range probed.Encoders {
-		if !strings.HasSuffix(name, "_nvenc") || containsCapability(nvidia.Encoders, name) {
-			capabilities.Encoders = append(capabilities.Encoders, name)
-		}
-	}
-	for _, name := range probed.HWAccels {
-		if name != "cuda" || nvidia.Device {
-			capabilities.HWAccels = append(capabilities.HWAccels, name)
-		}
-	}
-	if containsCapability(probed.Encoders, "libx264") {
-		capabilities.H264Encoder = "libx264"
-	}
-	for _, name := range []string{"aac_at", "libfdk_aac", "aac"} {
-		if containsCapability(probed.Encoders, name) {
-			capabilities.AACEncoders = append(capabilities.AACEncoders, name)
-		}
-	}
-	return capabilities
+	return ffmpeg.EncodingCapabilities(probed, nvidia)
 }
 
 // probeVaapiDriver records the driver of the configured VAAPI render node
@@ -1900,6 +2037,11 @@ func (app *application) Close(ctx context.Context) error {
 		return gateErr
 	}
 	defer release()
+	// A replica hands its sessions and jobs to its peers first (#652).
+	_ = app.DrainReplica(ctx)
+	if app.replicas != nil {
+		defer app.replicas.close()
+	}
 
 	var schedulerErr, webSocketErr, scannerErr error
 	// The change queue triggers the scheduler, so it stops first.
@@ -1914,6 +2056,15 @@ func (app *application) Close(ctx context.Context) error {
 		if schedulerErr == nil {
 			app.scheduler = nil
 		}
+	}
+	// The play sessions persist before the WebSockets close: a closing
+	// WebSocket ends its session, and that removal must not reach the store
+	// (#620).
+	if app.playSessions != nil {
+		if err := app.playSessions.Close(ctx); err != nil {
+			slog.Warn("persist play sessions at shutdown", "error", err.Error())
+		}
+		app.playSessions = nil
 	}
 	if app.webSockets != nil {
 		webSocketErr = app.webSockets.Close(ctx)
@@ -1965,6 +2116,22 @@ func (app *application) Close(ctx context.Context) error {
 		}
 		if transcodeErr != nil && ctx.Err() != nil && errors.Is(transcodeErr, ctx.Err()) {
 			return errors.Join(scannerErr, transcodeErr)
+		}
+	}
+	// The transcode manager released its remote jobs to their workers
+	// (#618); the hub closes after it.
+	if app.transcodeWorkers != nil {
+		workerErr := app.transcodeWorkers.Close(ctx)
+		if workerErr != nil {
+			return errors.Join(scannerErr, workerErr)
+		}
+		app.transcodeWorkers = nil
+	}
+	var liveStreamErr error
+	if app.liveStreams != nil {
+		liveStreamErr = app.liveStreams.Close(ctx)
+		if liveStreamErr == nil {
+			app.liveStreams = nil
 		}
 	}
 	if app.sessions != nil {
@@ -2039,7 +2206,7 @@ func (app *application) Close(ctx context.Context) error {
 	// Fold the scheduler close error into the store error so the existing
 	// errors.Join return line stays unchanged (additive-only carve-out).
 	storeErr = errors.Join(schedulerErr, storeErr)
-	return errors.Join(webSocketErr, scannerErr, trickplayGeneratorErr, trickplayReaderErr, transcodeErr, sessionErr, keyframeErr, listenBrainzErr, topologyErr, tasksErr, activityErr, userDataBusErr, busErr, storeErr)
+	return errors.Join(webSocketErr, scannerErr, trickplayGeneratorErr, trickplayReaderErr, transcodeErr, liveStreamErr, sessionErr, keyframeErr, listenBrainzErr, topologyErr, tasksErr, activityErr, userDataBusErr, busErr, storeErr)
 }
 
 func (app *application) enterClose(ctx context.Context) (func(), error) {
@@ -2098,56 +2265,68 @@ func createApplicationDirectories(paths config.Paths) error {
 // routes does not invoke these services, which permits the pure ledger path to
 // use nil services while retaining the exact runtime registration function.
 type routeServices struct {
-	identity           config.ServerIdentity
-	paths              config.Paths
-	webPath            string
-	webComponent       string
-	systemIdentity     func() config.ServerIdentity
-	webSocketPort      int
-	localAddress       string
-	startup            interface{ StartupWizardCompleted() bool }
-	network            auth.LocalNetwork
-	playGrants         *playgrant.Store
-	transcoding        transcodingState
-	setupGate          *middleware.SetupGate
-	manager            *config.Manager
-	users              *user.Service
-	apiKeys            handlers.APIKeyStore
-	localization       *localization.Service
-	clock              clock.Clock
-	refresh            refreshTrigger
-	libraryChanges     handlers.ChangeReporter
-	topology           *library.Topology
-	login              *auth.Login
-	sessions           *session.Manager
-	displayPreferences *displaypreferences.Service
-	playback           playback.PlaybackInfoService
-	playstate          playstate.Application
-	directFiles        playback.DirectFileSourceService
-	downloadFiles      playback.DownloadFileSourceService
-	progressive        playback.ProgressiveVideoStreamer
-	hls                playback.HLSVideoStreamer
-	subtitles          playback.SubtitleStreamer
-	attachments        handlers.AttachmentReader
-	trickplay          *trickplay.ReaderService
-	items              *store.ItemStore
-	itemBuilder        *dtobuild.Builder
-	views              *library.Views
-	playlists          *playlists.Service
-	collections        *library.Scanner
-	images             handlers.ImageRenderer
-	virtualPaths       path.VirtualPathExpander
-	webSockets         *ws.Server
-	sessionControl     *sessioncontrol.Service
-	lookup             handlers.ItemLookupSearcher
-	remoteImages       handlers.RemoteImagesService
-	metadataPlugins    handlers.MetadataPluginCatalog
-	itemDeleter        handlers.ItemDeleter
-	itemEditor         itemEditor
-	people             handlers.PersonRefresher
-	subtitleEditor     handlers.SubtitleEditor
-	scheduler          scheduledTaskService
-	activity           *activitylog.Log
+	// transcodeWorkers serves the worker routes and the admin API.
+	transcodeWorkers     *transcodeworker.Hub
+	transcodeWorkerStore *store.TranscodeWorkerStore
+	workerPlainHTTP      *transcodeWorkerPlainHTTP // the plain-HTTP opt-in (#664)
+	identity             config.ServerIdentity
+	paths                config.Paths
+	webPath              string
+	webComponent         string
+	systemIdentity       func() config.ServerIdentity
+	webSocketPort        int
+	localAddress         string
+	startup              interface{ StartupWizardCompleted() bool }
+	network              auth.LocalNetwork
+	playGrants           *playgrant.Store
+	playbackEdge         handlers.PlaybackInfoEdge
+	transcoding          transcodingState
+	setupGate            *middleware.SetupGate
+	manager              *config.Manager
+	users                *user.Service
+	apiKeys              handlers.APIKeyStore
+	localization         *localization.Service
+	clock                clock.Clock
+	refresh              refreshTrigger
+	libraryChanges       handlers.ChangeReporter
+	topology             *library.Topology
+	login                *auth.Login
+	sessions             *session.Manager
+	displayPreferences   *displaypreferences.Service
+	playback             playback.PlaybackInfoService
+	playstate            playstate.Application
+	directFiles          playback.DirectFileSourceService
+	downloadFiles        playback.DownloadFileSourceService
+	progressive          playback.ProgressiveVideoStreamer
+	hls                  playback.HLSVideoStreamer
+	subtitles            playback.SubtitleStreamer
+	attachments          handlers.AttachmentReader
+	trickplay            *trickplay.ReaderService
+	items                *store.ItemStore
+	itemBuilder          *dtobuild.Builder
+	views                *library.Views
+	playlists            *playlists.Service
+	collections          *library.Scanner
+	images               handlers.ImageRenderer
+	virtualPaths         path.VirtualPathExpander
+	webSockets           *ws.Server
+	sessionControl       *sessioncontrol.Service
+	lookup               handlers.ItemLookupSearcher
+	remoteImages         handlers.RemoteImagesService
+	metadataPlugins      handlers.MetadataPluginCatalog
+	itemDeleter          handlers.ItemDeleter
+	itemEditor           itemEditor
+	people               handlers.PersonRefresher
+	subtitleEditor       handlers.SubtitleEditor
+	scheduler            scheduledTaskService
+	liveTv               handlers.LiveTvAdmin
+	liveFiles            handlers.LiveStreamFiles
+	activity             *activitylog.Log
+
+	// sessionPeers and sessionOwners span the server replicas (#663); nil
+	// without replicas.
+	sessionPeers  handlers.SessionPeers
+	sessionOwners handlers.SessionOwners
 }
 
 // transcodingState answers the session and playstate questions about running
@@ -2225,6 +2404,15 @@ func registerRoutes(rt *router.Router, services routeServices) {
 	}
 	handlers.RegisterSystemWithConfig(rt, services.identity, services.startup, infoConfig)
 	handlers.RegisterBuild(rt, currentBuildInfo)
+	if services.transcodeWorkers != nil {
+		handlers.RegisterTranscodeWorkers(rt, services.transcodeWorkers)
+		handlers.RegisterTranscodeWorkerAdmin(rt, services.transcodeWorkerStore, services.transcodeWorkers, services.workerPlainHTTP.setting, services.clock)
+		handlers.RegisterTranscodeWorkerSignals(rt, services.transcodeWorkers)
+	} else {
+		handlers.RegisterTranscodeWorkers(rt, nil)
+		handlers.RegisterTranscodeWorkerAdmin(rt, nil, nil, nil, services.clock)
+		handlers.RegisterTranscodeWorkerSignals(rt, nil)
+	}
 	handlers.RegisterSetupUnlock(rt, services.setupGate)
 	handlers.RegisterSystemStorage(rt, infoConfig, services.topology)
 	handlers.RegisterStartup(rt, services.manager, services.users)
@@ -2260,7 +2448,7 @@ func registerRoutes(rt *router.Router, services routeServices) {
 		playlistBuilder = services.itemBuilder
 	}
 	handlers.RegisterPlaylists(rt, playlistService, playlistUsers, playlistBuilder, services.clock)
-	handlers.RegisterAuth(rt, services.login, services.users, services.sessions, services.items, services.itemBuilder, services.identity, services.startup, services.network, services.transcoding)
+	handlers.RegisterAuth(rt, services.login, services.users, services.sessions, services.items, services.itemBuilder, services.identity, services.startup, services.network, services.transcoding, services.sessionPeers)
 	handlers.RegisterSessionLogout(rt, services.users, services.sessions, services.webSockets)
 	var deviceService handlers.DeviceService
 	if services.users != nil {
@@ -2297,9 +2485,13 @@ func registerRoutes(rt *router.Router, services routeServices) {
 	handlers.RegisterItems(rt, services.items, services.itemBuilder, services.clock, itemDependencies...)
 	handlers.RegisterShows(rt, services.items, services.itemBuilder, services.items, services.users, services.clock, services.manager)
 	handlers.RegisterUserViews(rt, services.views, services.itemBuilder)
-	handlers.RegisterPlaybackInfo(rt, services.playback, services.users, services.playGrants)
+	playbackInfo := handlers.PlaybackInfoOptions{Grants: services.playGrants, Edge: services.playbackEdge}
+	if services.transcodeWorkers != nil {
+		playbackInfo.Warmup = services.transcodeWorkers
+	}
+	handlers.RegisterPlaybackInfoWithOptions(rt, services.playback, services.users, playbackInfo)
 	handlers.RegisterPlaystateWithGrants(rt, services.playstate, services.sessions, services.playGrants, services.transcoding)
-	handlers.RegisterSessionControl(rt, services.sessionControl)
+	handlers.RegisterSessionControl(rt, services.sessionControl, services.sessionOwners)
 	handlers.RegisterDirectVideoStreams(rt, services.directFiles, services.progressive)
 	handlers.RegisterDirectAudioStreams(rt, services.directFiles, services.users, services.playback, services.progressive, services.hls)
 	handlers.RegisterHLSStreams(rt, services.hls, slog.Default())
@@ -2318,7 +2510,14 @@ func registerRoutes(rt *router.Router, services routeServices) {
 	handlers.RegisterActivityLog(rt, services.activity, services.users)
 	handlers.RegisterPlugins(rt)
 	handlers.RegisterBackup(rt)
-	handlers.RegisterLiveTv(rt)
+	var liveTvReads handlers.LiveTvReads
+	if guide, ok := services.liveTv.(handlers.LiveTvGuide); ok && services.items != nil && services.itemBuilder != nil {
+		liveTvReads = handlers.LiveTvReads{Guide: guide, Items: services.items, Build: services.itemBuilder, Users: services.users, Clock: services.clock, Files: services.liveFiles}
+		if services.users != nil {
+			liveTvReads.AllUsers = services.users
+		}
+	}
+	handlers.RegisterLiveTv(rt, services.liveTv, liveTvReads)
 	handlers.RegisterSyncPlay(rt)
 	ws.Register(rt, services.webSockets)
 }

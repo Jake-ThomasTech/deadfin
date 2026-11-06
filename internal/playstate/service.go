@@ -236,6 +236,11 @@ func (service *Service) Progress(ctx context.Context, actor Actor, report Report
 // then persists its final durable playback state for every session user.
 func (service *Service) Stop(ctx context.Context, actor Actor, report Report) error {
 	if report.PositionTicks != nil && *report.PositionTicks < 0 {
+		// Release the live stream first so a stalled client does not hold
+		// a tuner (SessionManager.OnPlaybackStopped).
+		if snapshot, found := service.actorSnapshot(actor); found {
+			service.sessions.CloseLiveStreamIfNeeded(ctx, report.LiveStreamID, snapshot.ID)
+		}
 		return errors.New("playstate: position ticks must not be negative")
 	}
 

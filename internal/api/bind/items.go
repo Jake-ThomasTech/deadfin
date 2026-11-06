@@ -35,10 +35,11 @@ func ItemsQueryRequest(r *http.Request, clock clock.Clock) (store.ItemQuery, err
 // DefaultItemQueryDTOOptions contains the source route defaults shared by
 // Items-derived endpoints. DtoOptions starts with every image type enabled and
 // an unbounded per-type limit; an empty EnableImageTypes query keeps those
-// defaults rather than disabling artwork.
+// defaults rather than disabling artwork. AddCurrentProgram is on, as in
+// new DtoOptions().
 func DefaultItemQueryDTOOptions() store.ItemQueryDTOOptions {
 	return store.ItemQueryDTOOptions{
-		EnableImages: true, EnableUserData: true, ImageTypeLimit: int(^uint(0) >> 1),
+		EnableImages: true, EnableUserData: true, AddCurrentProgram: true, ImageTypeLimit: int(^uint(0) >> 1),
 		ImageTypes: []item.ImageType{item.ImageTypePrimary, item.ImageTypeArt, item.ImageTypeBackdrop, item.ImageTypeBanner, item.ImageTypeLogo, item.ImageTypeThumb, item.ImageTypeDisc, item.ImageTypeBox, item.ImageTypeScreenshot, item.ImageTypeMenu, item.ImageTypeChapter, item.ImageTypeBoxRear, item.ImageTypeProfile},
 	}
 }

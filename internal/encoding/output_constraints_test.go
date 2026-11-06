@@ -113,6 +113,26 @@ func TestSoftwareTranscodesBoundDimensionsBeforeArgvConstruction(t *testing.T) {
 		{name: "int32 maximum height", width: 1, height: math.MaxInt32},
 		{name: "int32 maximum product", width: math.MaxInt32, height: math.MaxInt32},
 		{name: "int32 minimum width", width: math.MinInt32, height: 1},
+		{name: "negative height", width: 1, height: -1},
+		{
+			// A live source that probed without a size transcodes at the
+			// source size.
+			name:             "unknown size keeps the source size",
+			wantValid:        true,
+			wantFilterPrefix: "scale=0:0",
+		},
+		{
+			name:             "unknown height keeps the aspect ratio",
+			width:            1_280,
+			wantValid:        true,
+			wantFilterPrefix: "scale=trunc(1280/2)*2:-2",
+		},
+		{
+			name:             "unknown width keeps the aspect ratio",
+			height:           720,
+			wantValid:        true,
+			wantFilterPrefix: "scale=-2:trunc(720/2)*2",
+		},
 	} {
 		t.Run(dimension.name, func(t *testing.T) {
 			for _, builder := range []struct {
@@ -267,6 +287,43 @@ func TestBuildHLSArgsAppliesDirectDolbyHEVCFMP4Tags(t *testing.T) {
 			gotStrict := hasArgumentValue(args, "-strict", "-2")
 			if gotStrict != test.wantStrict {
 				t.Fatalf("HEVC copy strict flag = %t, want %t; argv = %q", gotStrict, test.wantStrict, args)
+			}
+		})
+	}
+}
+
+// A live request may carry no bitrate and the source may have none either.
+// The encoder then runs on CRF alone; -maxrate 0 is invalid.
+func TestTranscodesWithoutBitrateOmitRateControl(t *testing.T) {
+	for _, builder := range []struct {
+		name  string
+		build func(EncodingJob) ([]string, error)
+	}{
+		{name: "progressive", build: func(job EncodingJob) ([]string, error) {
+			return BuildProgressiveArgs(job, progressiveTestCapabilities())
+		}},
+		{name: "HLS", build: func(job EncodingJob) ([]string, error) {
+			return BuildHLSArgs(HLSJob{EncodingJob: job, SegmentLengthSeconds: 3}, progressiveTestCapabilities())
+		}},
+	} {
+		t.Run(builder.name, func(t *testing.T) {
+			job := progressiveUnitJob()
+			if builder.name == "HLS" {
+				job.OutputPath = "/cache/master.m3u8"
+				job.VideoQuality.ForcedKeyFrameSeconds = 3
+			}
+			job.OutputVideoBitrate = 0
+			args, err := builder.build(job)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			if argumentValue(t, args, "-crf") != "23" {
+				t.Errorf("argv = %q, want -crf 23", args)
+			}
+			for _, option := range args {
+				if option == "-maxrate" || option == "-bufsize" {
+					t.Errorf("argv = %q, want no %s without a bitrate", args, option)
+				}
 			}
 		})
 	}

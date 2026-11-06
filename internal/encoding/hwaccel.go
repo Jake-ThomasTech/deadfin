@@ -1053,6 +1053,11 @@ func planNvidia(plan *videoPlan, job EncodingJob, caps Capabilities, decoder []s
 // text subtitles render onto a transparent alphasrc canvas.
 func hardwareSubtitleSource(job EncodingJob, width, maxHeight int) ([]string, bool) {
 	subWidth, subHeight := width, evenDimension(job.OutputHeight)
+	if subWidth <= 0 || subHeight <= 0 {
+		// An unknown output size cannot size alphasrc; render the
+		// subtitle canvas at 1080p and let the overlay stretch it.
+		subWidth, subHeight = 1920, maxHeight
+	}
 	if subHeight > maxHeight {
 		subWidth = evenDimension(subWidth * maxHeight / subHeight)
 		subHeight = maxHeight
@@ -1121,8 +1126,23 @@ func fullRangeTonemap(options HardwareOptions, mjpeg bool) HardwareOptions {
 	return options
 }
 
+// swScaleFilter ports GetSwScaleFilter for a fixed output size. An unknown
+// dimension (zero) keeps the source size on that axis: the aspect ratio comes
+// from -2, or from the input size when both dimensions are unknown. Upstream
+// emits no scale filter at all in the last case; a no-op scale keeps the
+// filter chain non-empty for callers that concatenate it.
 func swScaleFilter(job EncodingJob) string {
-	return "scale=trunc(" + strconv.Itoa(job.OutputWidth) + "/2)*2:trunc(" + strconv.Itoa(job.OutputHeight) + "/2)*2"
+	width, height := job.OutputWidth, job.OutputHeight
+	switch {
+	case width > 0 && height > 0:
+		return "scale=trunc(" + strconv.Itoa(width) + "/2)*2:trunc(" + strconv.Itoa(height) + "/2)*2"
+	case width > 0:
+		return "scale=trunc(" + strconv.Itoa(width) + "/2)*2:-2"
+	case height > 0:
+		return "scale=-2:trunc(" + strconv.Itoa(height) + "/2)*2"
+	default:
+		return "scale=0:0"
+	}
 }
 
 func evenDimension(value int) int { return 2 * (value / 2) }
@@ -1147,8 +1167,14 @@ func hwScaleFilter(prefix, suffix, format string, stream VideoStream, width, hei
 }
 
 // graphicalSubPreProcess ports GetGraphicalSubPreProcessFilters for a
-// subtitle whose canvas size is unknown, which always pads.
+// subtitle whose canvas size is unknown, which always pads. Without an output
+// size the graph keeps the subtitle canvas as it is: crop rejects zero
+// dimensions. Upstream returns no filter in that case
+// (EncodingHelper.cs:3399-3405).
 func graphicalSubPreProcess(width, height int) string {
+	if width <= 0 || height <= 0 {
+		return "scale"
+	}
 	w, h := strconv.Itoa(width), strconv.Itoa(height)
 	return "scale,scale=-1:" + h + ":fast_bilinear,crop,pad=max(" + w + "\\,iw):max(" + h + "\\,ih):(ow-iw)/2:(oh-ih)/2:black@0,crop=" + w + ":" + h
 }

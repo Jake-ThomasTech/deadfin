@@ -8,8 +8,10 @@
 // authorization header.
 //
 // The store is in memory, mutex-protected, and bounded. A clock.Clock drives
-// every expiry comparison; there is no background goroutine. A restart drops
-// every grant, and the client then needs a new PlaybackInfo.
+// every expiry comparison; there is no background goroutine. With
+// persistence on, the store tracks each changed grant, a session.Persister
+// writes it behind the change, and the next server process restores the
+// grants at startup (#620).
 package playgrant
 
 import (
@@ -18,6 +20,7 @@ import (
 
 	"github.com/deadfin-org/deadfin/internal/clock"
 	"github.com/deadfin-org/deadfin/internal/dto"
+	"github.com/deadfin-org/deadfin/internal/store"
 )
 
 const (
@@ -48,6 +51,10 @@ type Store struct {
 
 	mu     sync.Mutex
 	grants map[string]Grant // keyed by PlaySessionId
+	// dirty holds the PlaySessionIds changed or removed since the last
+	// TakeChanges, while persistence is on.
+	dirty  map[string]struct{}
+	notify chan struct{}
 }
 
 // New constructs an empty grant store.
@@ -67,6 +74,7 @@ func (store *Store) Issue(playSessionID string, userID, itemID dto.UUID, mediaSo
 	defer store.mu.Unlock()
 	store.sweep(now)
 	delete(store.grants, playSessionID)
+	store.markDirty(playSessionID)
 	if store.countUser(userID) >= MaxGrantsPerUser {
 		store.evictOldest(func(grant Grant) bool { return grant.UserID == userID })
 	}
@@ -98,6 +106,7 @@ func (store *Store) Authorize(playSessionID string, itemID dto.UUID, mediaSource
 	}
 	grant.lastUsed = now
 	store.grants[playSessionID] = grant
+	store.markDirty(playSessionID)
 	return grant.UserID, true
 }
 
@@ -113,7 +122,20 @@ func (store *Store) Touch(playSessionID string, userID dto.UUID) {
 	if grant, ok := store.live(playSessionID, now); ok && grant.UserID == userID {
 		grant.lastUsed = now
 		store.grants[playSessionID] = grant
+		store.markDirty(playSessionID)
 	}
+}
+
+// Has reports whether playSessionID has a live grant here (#652).
+func (store *Store) Has(playSessionID string) bool {
+	if store == nil || playSessionID == "" {
+		return false
+	}
+	now := store.clock.Now()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	_, ok := store.live(playSessionID, now)
+	return ok
 }
 
 // Len reports the stored grant count, expired ones included until a sweep.
@@ -130,6 +152,7 @@ func (store *Store) live(playSessionID string, now time.Time) (Grant, bool) {
 	}
 	if expired(grant, now) {
 		delete(store.grants, playSessionID)
+		store.markDirty(playSessionID)
 		return Grant{}, false
 	}
 	return grant, true
@@ -139,6 +162,7 @@ func (store *Store) sweep(now time.Time) {
 	for key, grant := range store.grants {
 		if expired(grant, now) {
 			delete(store.grants, key)
+			store.markDirty(key)
 		}
 	}
 }
@@ -166,6 +190,96 @@ func (store *Store) evictOldest(match func(Grant) bool) {
 	}
 	if found {
 		delete(store.grants, oldestKey)
+		store.markDirty(oldestKey)
+	}
+}
+
+// EnablePersistence starts change tracking and returns the channel that
+// signals a change. The channel holds at most one signal.
+func (store *Store) EnablePersistence() <-chan struct{} {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.notify == nil {
+		store.notify = make(chan struct{}, 1)
+		store.dirty = make(map[string]struct{})
+	}
+	return store.notify
+}
+
+func (store *Store) markDirty(playSessionID string) {
+	if store.dirty == nil {
+		return
+	}
+	store.dirty[playSessionID] = struct{}{}
+	select {
+	case store.notify <- struct{}{}:
+	default:
+	}
+}
+
+// MarkDirty queues the grants of playSessionIDs for the next TakeChanges
+// again, as after a failed write.
+func (store *Store) MarkDirty(playSessionIDs []string) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, id := range playSessionIDs {
+		store.markDirty(id)
+	}
+}
+
+// TakeChanges returns each grant changed since the last call, and the
+// PlaySessionIds of the removed ones.
+func (store *Store) TakeChanges() (grants []store.PlayGrantRecord, removed []string) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for id := range store.dirty {
+		delete(store.dirty, id)
+		grant, found := store.grants[id]
+		if !found {
+			removed = append(removed, id)
+			continue
+		}
+		grants = append(grants, grant.record(id))
+	}
+	return grants, removed
+}
+
+// Restore adds the persisted grants of a previous server process. It skips
+// an expired grant and keeps the bounds: past them it evicts as Issue does.
+func (store *Store) Restore(records []store.PlayGrantRecord) {
+	now := store.clock.Now()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, record := range records {
+		grant := Grant{
+			UserID:         record.UserID,
+			ItemID:         record.ItemID,
+			MediaSourceIDs: append([]string(nil), record.MediaSourceIDs...),
+			lastUsed:       record.LastUsed,
+		}
+		if record.PlaySessionID == "" || grant.UserID.IsNil() || grant.ItemID.IsNil() || expired(grant, now) {
+			continue
+		}
+		if _, found := store.grants[record.PlaySessionID]; found {
+			continue
+		}
+		if store.countUser(grant.UserID) >= MaxGrantsPerUser {
+			store.evictOldest(func(other Grant) bool { return other.UserID == grant.UserID })
+		}
+		if len(store.grants) >= MaxGrants {
+			store.evictOldest(func(Grant) bool { return true })
+		}
+		store.grants[record.PlaySessionID] = grant
+	}
+}
+
+func (grant Grant) record(playSessionID string) store.PlayGrantRecord {
+	return store.PlayGrantRecord{
+		PlaySessionID:  playSessionID,
+		UserID:         grant.UserID,
+		ItemID:         grant.ItemID,
+		MediaSourceIDs: append([]string(nil), grant.MediaSourceIDs...),
+		LastUsed:       grant.lastUsed,
 	}
 }
 

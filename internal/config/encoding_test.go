@@ -3,6 +3,7 @@
 package config_test
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"os"
 	"path/filepath"
@@ -86,5 +87,48 @@ func TestEncodingOptionsXMLRoundTripUsesUpstreamArrayShape(t *testing.T) {
 	}
 	if !reflect.DeepEqual(decoded, config.DefaultEncodingOptions()) {
 		t.Fatalf("round trip = %#v", decoded)
+	}
+}
+
+// AllowPlainHttpTranscodeWorkers is Deadfin-only (D-118, #664): it
+// round-trips through the encoding configuration endpoint and encoding.xml,
+// a stock save that omits it keeps it, and an unset value stays off the wire.
+func TestEncodingAllowPlainHttpTranscodeWorkersRoundTrips(t *testing.T) {
+	paths := mustPaths(t)
+	manager, err := config.Open(t.Context(), paths, newChangeBus(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	encoded, err := json.Marshal(manager.Encoding())
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), "AllowPlainHttpTranscodeWorkers") {
+		t.Fatalf("unset field on the wire: %s", encoded)
+	}
+	if err := manager.SaveNamedConfiguration(t.Context(), config.KeyEncoding, []byte(`{"AllowPlainHttpTranscodeWorkers":true}`)); err != nil {
+		t.Fatalf("save on: %v", err)
+	}
+	if got := manager.Encoding().AllowPlainHttpTranscodeWorkers; got == nil || !*got {
+		t.Fatalf("after save on = %v, want true", got)
+	}
+	if err := manager.SaveNamedConfiguration(t.Context(), config.KeyEncoding, []byte(`{"EncoderPreset":"fast"}`)); err != nil {
+		t.Fatalf("stock save: %v", err)
+	}
+	if got := manager.Encoding().AllowPlainHttpTranscodeWorkers; got == nil || !*got {
+		t.Fatalf("after stock save = %v, want kept true", got)
+	}
+	reopened, err := config.Open(t.Context(), paths, newChangeBus(t))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if got := reopened.Encoding().AllowPlainHttpTranscodeWorkers; got == nil || !*got {
+		t.Fatalf("after reopen = %v, want true from encoding.xml", got)
+	}
+	if err := manager.SaveNamedConfiguration(t.Context(), config.KeyEncoding, []byte(`{"AllowPlainHttpTranscodeWorkers":false}`)); err != nil {
+		t.Fatalf("save off: %v", err)
+	}
+	if got := manager.Encoding().AllowPlainHttpTranscodeWorkers; got == nil || *got {
+		t.Fatalf("after save off = %v, want false", got)
 	}
 }

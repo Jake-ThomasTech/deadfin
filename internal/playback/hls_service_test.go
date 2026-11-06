@@ -489,6 +489,64 @@ func TestHLSServiceLiveAcceptsSelectedInfiniteFileSource(t *testing.T) {
 	}
 }
 
+// hlsLiveTvStub resolves every live stream id to one open source.
+type hlsLiveTvStub struct{ source playback.MediaSourceInfo }
+
+func (hlsLiveTvStub) ChannelSources(context.Context, dto.UUID) ([]playback.MediaSourceInfo, bool, error) {
+	return nil, false, nil
+}
+
+func (stub hlsLiveTvStub) LiveStream(context.Context, string) (playback.MediaSourceInfo, bool) {
+	return stub.source, true
+}
+
+// A live probe can detect a video stream without its dimensions when the
+// source joins mid-GOP. The transcode keeps the source size, and the master
+// playlist omits RESOLUTION because it is unknown.
+func TestHLSServiceLiveTranscodesSourceWithoutProbedDimensions(t *testing.T) {
+	audioBitrate, channels := 128_000, 2
+	source := playback.MediaSourceInfo{
+		Protocol:     playback.MediaProtocolHTTP,
+		Path:         "http://127.0.0.1:8096/LiveTv/LiveStreamFiles/stream-1/stream.ts",
+		Container:    "mpegts",
+		LiveStreamID: "live-1",
+		MediaStreams: []playback.MediaStream{
+			{Type: playback.StreamTypeVideo, Index: 0, Codec: "mpeg2video"},
+			{Type: playback.StreamTypeAudio, Index: 1, Codec: "aac", BitRate: &audioBitrate, Channels: &channels, IsDefault: true},
+		},
+	}
+	manager := &hlsFakeManager{playlist: "#EXTM3U\n"}
+	config := hlsServiceConfig(&progressiveFakeSource{}, manager)
+	config.LiveTv = hlsLiveTvStub{source: source}
+	service := playback.NewHLSService(config)
+	request := hlsTranscodeRequest()
+	request.Live = true
+	request.LiveStreamID = "live-1"
+	request.MaxWidth, request.MaxHeight = nil, nil
+	request.AudioStreamIndex = hlsInt(1)
+
+	master, err := service.Master(t.Context(), request)
+	if err != nil {
+		t.Fatalf("Master() live source without dimensions: %v", err)
+	}
+	if playlist := readHLSResponse(t, master); strings.Contains(playlist, ",RESOLUTION=") {
+		t.Errorf("Master() playlist = %q, want no RESOLUTION without a known output size", playlist)
+	}
+
+	if _, err := service.Live(t.Context(), request); err != nil {
+		t.Fatalf("Live() live source without dimensions: %v", err)
+	}
+	filter := ""
+	for index := 0; index+1 < len(manager.lastStart.Args); index++ {
+		if manager.lastStart.Args[index] == "-vf" {
+			filter = manager.lastStart.Args[index+1]
+		}
+	}
+	if !strings.Contains(filter, "scale=trunc(960/2)*2:-2") {
+		t.Errorf("Live() -vf = %q, want an aspect-preserving width scale without a height", filter)
+	}
+}
+
 func TestHLSServiceLiveDefersProviderBackedLiveStreamRequest(t *testing.T) {
 	manager := &hlsFakeManager{playlist: "#EXTM3U\n"}
 	service := newHLSService(&progressiveFakeSource{source: progressiveCopySource("/media/recording-in-progress.ts")}, manager)
@@ -2108,5 +2166,112 @@ func TestHLSServiceKeysConcurrentSessionsOnOneItemApart(t *testing.T) {
 	}
 	if got := outputPath("play-session-a", "atv-living-room"); got != livingRoom {
 		t.Fatalf("one play session moved to playlist family %q, want %q", got, livingRoom)
+	}
+}
+
+// A copy of a source without probed dimensions cannot write an fMP4 track
+// header, and the client may have sent no bitrate to transcode with. The
+// segment container falls back to mpegts, which needs neither.
+func TestHLSServiceLiveSizelessFMP4Copy(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		codec       string
+		wantCodec   string
+		wantSegment string
+	}{
+		// H.264 copies into mpegts segments, which carry no frame size.
+		{name: "h264 copies into mpegts", codec: "h264", wantCodec: "copy", wantSegment: "mpegts"},
+		// Apple HLS plays HEVC only in fMP4, so HEVC transcodes and the
+		// encoder supplies the size.
+		{name: "hevc transcodes into fMP4", codec: "hevc", wantSegment: "fmp4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			audioBitrate, channels := 128_000, 2
+			source := playback.MediaSourceInfo{
+				Protocol:     playback.MediaProtocolHTTP,
+				Path:         "http://127.0.0.1:8096/LiveTv/LiveStreamFiles/stream-1/stream.ts",
+				Container:    "mpegts",
+				LiveStreamID: "live-1",
+				MediaStreams: []playback.MediaStream{
+					{Type: playback.StreamTypeVideo, Index: 0, Codec: tc.codec},
+					{Type: playback.StreamTypeAudio, Index: 1, Codec: "aac", BitRate: &audioBitrate, Channels: &channels, IsDefault: true},
+				},
+			}
+			manager := &hlsFakeManager{playlist: "#EXTM3U\n"}
+			config := hlsServiceConfig(&progressiveFakeSource{}, manager)
+			config.LiveTv = hlsLiveTvStub{source: source}
+			service := playback.NewHLSService(config)
+			request := hlsTranscodeRequest()
+			request.Live = true
+			request.LiveStreamID = "live-1"
+			request.MaxWidth, request.MaxHeight, request.VideoBitrate = nil, nil, nil
+			// The Apple TV clients list HEVC first, then H.264.
+			request.VideoCodec, request.VideoCodecs = tc.codec, []string{tc.codec, "h264"}
+			request.AllowVideoStreamCopy = true
+			request.SegmentContainer = "fmp4"
+			request.AudioStreamIndex = hlsInt(1)
+
+			if _, err := service.Live(t.Context(), request); err != nil {
+				t.Fatalf("Live() sizeless %s: %v", tc.codec, err)
+			}
+			copied := hlsArgPair(manager.lastStart.Args, "-codec:v:0", "copy")
+			if copied != (tc.wantCodec == "copy") {
+				t.Errorf("Live() argv = %q, video copy = %v, want %v", manager.lastStart.Args, copied, tc.wantCodec == "copy")
+			}
+			if !hlsArgPair(manager.lastStart.Args, "-hls_segment_type", tc.wantSegment) {
+				t.Errorf("Live() argv = %q, want %s segments", manager.lastStart.Args, tc.wantSegment)
+			}
+		})
+	}
+}
+
+// Without any bitrate the tuner fallback supplies -maxrate. Without that
+// fallback too, the transcode still builds and runs on CRF alone.
+func TestHLSServiceLiveBitrateWithoutARate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fallback *int
+		wantRate string
+	}{
+		{name: "tuner fallback", fallback: hlsInt(8_000_000), wantRate: "8000000"},
+		{name: "no rate at all"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			audioBitrate, channels := 128_000, 2
+			source := playback.MediaSourceInfo{
+				Protocol:                    playback.MediaProtocolHTTP,
+				Path:                        "http://127.0.0.1:8096/LiveTv/LiveStreamFiles/stream-1/stream.ts",
+				Container:                   "mpegts",
+				LiveStreamID:                "live-1",
+				FallbackMaxStreamingBitrate: tc.fallback,
+				MediaStreams: []playback.MediaStream{
+					{Type: playback.StreamTypeVideo, Index: 0, Codec: "mpeg2video"},
+					{Type: playback.StreamTypeAudio, Index: 1, Codec: "aac", BitRate: &audioBitrate, Channels: &channels, IsDefault: true},
+				},
+			}
+			manager := &hlsFakeManager{playlist: "#EXTM3U\n"}
+			config := hlsServiceConfig(&progressiveFakeSource{}, manager)
+			config.LiveTv = hlsLiveTvStub{source: source}
+			service := playback.NewHLSService(config)
+			request := hlsTranscodeRequest()
+			request.Live = true
+			request.LiveStreamID = "live-1"
+			request.MaxWidth, request.MaxHeight, request.VideoBitrate = nil, nil, nil
+			request.AudioStreamIndex = hlsInt(1)
+
+			if _, err := service.Live(t.Context(), request); err != nil {
+				t.Fatalf("Live() without a bitrate: %v", err)
+			}
+			args := manager.lastStart.Args
+			if tc.wantRate == "" {
+				if hlsArgPair(args, "-maxrate", "0") {
+					t.Errorf("argv = %q, want no -maxrate 0", args)
+				}
+				return
+			}
+			if !hlsArgPair(args, "-maxrate", tc.wantRate) {
+				t.Errorf("argv = %q, want -maxrate %s from the tuner fallback", args, tc.wantRate)
+			}
+		})
 	}
 }

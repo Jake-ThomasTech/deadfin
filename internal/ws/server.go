@@ -53,6 +53,30 @@ type Config struct {
 	UserDataChanges  *events.Bus[playstate.UserDataChanged]
 	Activity         *activitylog.Log
 	Tasks            *tasks.Catalog
+	// Relay hands this server's events to the peer replicas (#663); nil
+	// without replicas. It must not wait.
+	Relay func(PeerEvent)
+	// PeerSessions returns the peer replicas' sessions for the Sessions
+	// feed; nil without replicas.
+	PeerSessions func(context.Context, SessionsQuery) []dto.SessionInfoDto
+}
+
+// PeerEvent is a server event that one replica relays to the others (#663).
+// Kind is the WebSocket message that the event starts.
+type PeerEvent struct {
+	Kind     MessageType                `json:"Kind"`
+	UserData *playstate.UserDataChanged `json:"UserData,omitempty"`
+	Library  *library.UpdateInfo        `json:"Library,omitempty"`
+	Refresh  *RefreshProgressInfo       `json:"Refresh,omitempty"`
+	// Force is a session change that the Sessions feed sends at once.
+	Force bool `json:"Force,omitempty"`
+}
+
+// SessionsQuery selects the sessions of the Sessions feed: those of UserID,
+// or all of them.
+type SessionsQuery struct {
+	UserID dto.UUID `json:"UserId"`
+	All    bool     `json:"All"`
 }
 
 // Server owns all live WebSocket connections and their supervised workers.
@@ -63,6 +87,14 @@ type Server struct {
 	closed      bool
 	connections map[*connection]struct{}
 	bySession   map[string]map[*connection]struct{}
+
+	// peerEvents and peerUserData carry the peers' events to the
+	// connections; nil without replicas.
+	peerEvents   *events.Bus[PeerEvent]
+	peerUserData *events.Bus[playstate.UserDataChanged]
+	// relayCancel and relayDone stop the relay goroutine.
+	relayCancel context.CancelFunc
+	relayDone   chan struct{}
 }
 
 // New constructs a WebSocket server.
@@ -73,9 +105,136 @@ func New(config Config) *Server {
 	if config.Random == nil {
 		config.Random = rand.Reader
 	}
-	return &Server{
+	server := &Server{
 		config: config, connections: make(map[*connection]struct{}),
 		bySession: make(map[string]map[*connection]struct{}),
+	}
+	if config.Relay != nil {
+		server.peerEvents = events.NewBus[PeerEvent](config.Clock)
+		server.peerUserData = events.NewBus[playstate.UserDataChanged](config.Clock)
+		ctx, cancel := context.WithCancel(context.Background())
+		server.relayCancel, server.relayDone = cancel, make(chan struct{})
+		go server.relay(ctx, server.relaySources())
+	}
+	return server
+}
+
+// relaySources subscribes to the events that the peers' WebSockets also
+// send. The relay goroutine closes the subscriptions.
+func (server *Server) relaySources() relaySources {
+	config := server.config
+	var sources relaySources
+	if config.Sessions != nil {
+		sources.sessions = config.Sessions.Subscribe(events.SubscriptionOptions{Buffer: 64})
+	}
+	if config.UserDataChanges != nil {
+		sources.userData = config.UserDataChanges.Subscribe(events.SubscriptionOptions{Buffer: 256})
+	}
+	if config.LibraryChanges != nil {
+		sources.library = config.LibraryChanges.Subscribe(16)
+	}
+	if config.RefreshProgress != nil {
+		sources.refresh = config.RefreshProgress.Subscribe(events.SubscriptionOptions{Buffer: 256})
+	}
+	if config.Activity != nil {
+		sources.activity = config.Activity.Subscribe(events.SubscriptionOptions{Buffer: 64})
+	}
+	return sources
+}
+
+type relaySources struct {
+	sessions *events.Subscription[session.Change]
+	userData *events.Subscription[playstate.UserDataChanged]
+	library  *events.Subscription[library.UpdateInfo]
+	refresh  *events.Subscription[library.RefreshProgress]
+	activity *events.Subscription[activitylog.Entry]
+}
+
+// relay hands this server's events to Config.Relay until ctx ends.
+func (server *Server) relay(ctx context.Context, sources relaySources) {
+	defer close(server.relayDone)
+	defer func() {
+		background := context.Background()
+		if sources.sessions != nil {
+			_ = sources.sessions.Close(background)
+		}
+		if sources.userData != nil {
+			_ = sources.userData.Close(background)
+		}
+		if sources.library != nil {
+			_ = sources.library.Close(background)
+		}
+		if sources.refresh != nil {
+			_ = sources.refresh.Close(background)
+		}
+		if sources.activity != nil {
+			_ = sources.activity.Close(background)
+		}
+	}()
+	sessions, userData, libraryChanges := channelOf(sources.sessions), channelOf(sources.userData), channelOf(sources.library)
+	refresh, activity := channelOf(sources.refresh), channelOf(sources.activity)
+	publish := server.config.Relay
+	for sessions != nil || userData != nil || libraryChanges != nil || refresh != nil || activity != nil {
+		select {
+		case <-ctx.Done():
+			return
+		case change, open := <-sessions:
+			if !open {
+				sessions = nil
+				continue
+			}
+			publish(PeerEvent{Kind: MessageSessions, Force: change.Force})
+		case change, open := <-userData:
+			if !open {
+				userData = nil
+				continue
+			}
+			publish(PeerEvent{Kind: MessageUserDataChanged, UserData: &change})
+		case info, open := <-libraryChanges:
+			if !open {
+				libraryChanges = nil
+				continue
+			}
+			publish(PeerEvent{Kind: MessageLibraryChanged, Library: &info})
+		case progress, open := <-refresh:
+			if !open {
+				refresh = nil
+				continue
+			}
+			publish(PeerEvent{Kind: MessageRefreshProgress, Refresh: &RefreshProgressInfo{ItemID: progress.ItemID, Progress: progress.Progress}})
+		case _, open := <-activity:
+			if !open {
+				activity = nil
+				continue
+			}
+			publish(PeerEvent{Kind: MessageActivityLogEntry})
+		}
+	}
+}
+
+// channelOf returns the events of subscription; nil, which never sends,
+// when there is none.
+func channelOf[T any](subscription *events.Subscription[T]) <-chan T {
+	if subscription == nil {
+		return nil
+	}
+	return subscription.Events()
+}
+
+// ReceivePeerEvents sends the events of a peer replica to this server's
+// WebSockets, as the peer sends them to its own (#663).
+func (server *Server) ReceivePeerEvents(received []PeerEvent) {
+	if server == nil || server.peerEvents == nil {
+		return
+	}
+	for _, event := range received {
+		if event.Kind == MessageUserDataChanged {
+			if event.UserData != nil {
+				server.peerUserData.Publish(*event.UserData)
+			}
+			continue
+		}
+		server.peerEvents.Publish(event)
 	}
 }
 
@@ -152,6 +311,18 @@ func (server *Server) Close(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+	if server.relayCancel != nil {
+		server.relayCancel()
+		select {
+		case <-server.relayDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if err := server.peerEvents.Close(ctx); err != nil {
+			return err
+		}
+		return server.peerUserData.Close(ctx)
 	}
 	return nil
 }
@@ -430,14 +601,28 @@ func (connection *connection) startFeeds() {
 	connection.forwardLibraryChanges()
 	connection.forwardUserDataChanges()
 	connection.forwardRefreshProgress()
+	connection.forwardPeerEvents()
 }
 
 func (connection *connection) loadSessions(ctx context.Context) (any, error) {
-	config := connection.server.config
+	query := SessionsQuery{UserID: connection.identity.UserID, All: connection.identity.APIKey || connection.identity.Administrator}
+	result := connection.server.LocalSessions(ctx, query)
+	if peers := connection.server.config.PeerSessions; peers != nil {
+		result = sessiondto.Merge(result, peers(ctx, query))
+	}
+	return result, nil
+}
+
+// LocalSessions returns the Sessions feed of this replica's own sessions.
+func (server *Server) LocalSessions(ctx context.Context, query SessionsQuery) []dto.SessionInfoDto {
+	config := server.config
+	if config.Sessions == nil {
+		return []dto.SessionInfoDto{}
+	}
 	snapshots := config.Sessions.Sessions(session.Query{})
 	result := make([]dto.SessionInfoDto, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		if !connection.identity.APIKey && !connection.identity.Administrator && !containsUser(snapshot, connection.identity.UserID) {
+		if !query.All && !containsUser(snapshot, query.UserID) {
 			continue
 		}
 		userName := ""
@@ -452,7 +637,7 @@ func (connection *connection) loadSessions(ctx context.Context) (any, error) {
 			result = append(result, config.SessionProjector.Project(ctx, snapshot, userName))
 		}
 	}
-	return result, nil
+	return result
 }
 
 func containsUser(snapshot session.Snapshot, userID dto.UUID) bool {
@@ -499,18 +684,52 @@ func (connection *connection) forwardLibraryChanges() {
 }
 
 func (connection *connection) forwardUserDataChanges() {
-	if connection.identity.UserID.IsNil() || connection.server.config.UserDataChanges == nil ||
-		connection.server.config.Items == nil || connection.server.config.ItemBuilder == nil {
+	if connection.identity.UserID.IsNil() || connection.server.config.Items == nil || connection.server.config.ItemBuilder == nil {
 		return
 	}
-	subscription := playstate.SubscribeUserDataChanges(connection.server.config.UserDataChanges, connection.identity.UserID, 4)
-	forward(connection, subscription.Events(), func(change playstate.UserDataChanged) {
-		info, err := connection.projectUserData(connection.ctx, change)
-		if err != nil {
-			connection.cancel()
-			return
+	for _, bus := range []*events.Bus[playstate.UserDataChanged]{connection.server.config.UserDataChanges, connection.server.peerUserData} {
+		if bus == nil {
+			continue
 		}
-		connection.send(MessageUserDataChanged, info)
+		subscription := playstate.SubscribeUserDataChanges(bus, connection.identity.UserID, 4)
+		forward(connection, subscription.Events(), func(change playstate.UserDataChanged) {
+			info, err := connection.projectUserData(connection.ctx, change)
+			if err != nil {
+				connection.cancel()
+				return
+			}
+			connection.send(MessageUserDataChanged, info)
+		}, func() { _ = subscription.Close(context.Background()) })
+	}
+}
+
+// forwardPeerEvents sends the peer replicas' events other than user data,
+// as forwardLibraryChanges and the feeds send this replica's own.
+func (connection *connection) forwardPeerEvents() {
+	if connection.server.peerEvents == nil {
+		return
+	}
+	administrator := connection.identity.APIKey || connection.identity.Administrator
+	subscription := connection.server.peerEvents.Subscribe(events.SubscriptionOptions{Buffer: 32})
+	forward(connection, subscription.Events(), func(event PeerEvent) {
+		switch event.Kind {
+		case MessageSessions:
+			if feed := connection.feeds[MessageSessions]; feed != nil {
+				feed.changed(event.Force)
+			}
+		case MessageActivityLogEntry:
+			if feed := connection.feeds[MessageActivityLogEntry]; feed != nil {
+				feed.changed(true)
+			}
+		case MessageLibraryChanged:
+			if event.Library != nil && !event.Library.Empty() {
+				connection.send(MessageLibraryChanged, *event.Library)
+			}
+		case MessageRefreshProgress:
+			if event.Refresh != nil && administrator {
+				connection.send(MessageRefreshProgress, *event.Refresh)
+			}
+		}
 	}, func() { _ = subscription.Close(context.Background()) })
 }
 

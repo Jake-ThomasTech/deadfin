@@ -17,7 +17,7 @@ import (
 
 func TestLiveTvRoutesMatchPinnedOpenAPI(t *testing.T) {
 	rt := router.New()
-	handlers.RegisterLiveTv(rt)
+	handlers.RegisterLiveTv(rt, &fakeLiveTvAdmin{}, handlers.LiveTvReads{})
 
 	access := string(auth.PolicyLiveTVAccess)
 	manage := string(auth.PolicyLiveTVManagement)
@@ -61,6 +61,7 @@ func TestLiveTvRoutesMatchPinnedOpenAPI(t *testing.T) {
 		{Method: http.MethodPost, Pattern: "/LiveTv/Tuners/{tunerId}/Reset", OperationID: "ResetTuner", Policy: elevated},
 		{Method: http.MethodGet, Pattern: "/LiveTv/Tuners/Discover", OperationID: "DiscoverTuners", Policy: elevated},
 		{Method: http.MethodGet, Pattern: "/LiveTv/Tuners/Discvover", OperationID: "DiscvoverTuners", Policy: elevated},
+		{Method: http.MethodGet, Pattern: "/deadfin/v1/livetv/tunerhosts/{id}/groups", OperationID: "NATIVE:GetTunerHostGroups", Policy: elevated},
 	}
 
 	if got := len(rt.Routes()); got != len(wantRoutes) {
@@ -78,7 +79,7 @@ func TestLiveTvRoutesMatchPinnedOpenAPI(t *testing.T) {
 
 func TestLiveTvInfoReportsDisabledWithNoServicesOrUsers(t *testing.T) {
 	rt := router.New()
-	handlers.RegisterLiveTv(rt)
+	handlers.RegisterLiveTv(rt, &fakeLiveTvAdmin{}, handlers.LiveTvReads{})
 	record := liveTvRequest(rt, http.MethodGet, "/LiveTv/Info", "")
 	if record.Code != http.StatusOK {
 		t.Fatalf("GET LiveTv Info status = %d, want 200; body=%s", record.Code, record.Body.String())
@@ -98,7 +99,7 @@ func TestLiveTvInfoReportsDisabledWithNoServicesOrUsers(t *testing.T) {
 
 func TestLiveTvCollectionEndpointsReturnEmptyQueryResults(t *testing.T) {
 	rt := router.New()
-	handlers.RegisterLiveTv(rt)
+	handlers.RegisterLiveTv(rt, &fakeLiveTvAdmin{}, handlers.LiveTvReads{})
 	for _, tc := range []struct {
 		method string
 		path   string
@@ -128,14 +129,9 @@ func TestLiveTvCollectionEndpointsReturnEmptyQueryResults(t *testing.T) {
 	}
 }
 
-func TestLiveTvMutationsKeepDocumentedSuccessAndNotFoundShapes(t *testing.T) {
+func TestLiveTvDeferredRoutesKeepNotFoundShape(t *testing.T) {
 	rt := router.New()
-	handlers.RegisterLiveTv(rt)
-
-	created := liveTvRequest(rt, http.MethodPost, "/LiveTv/TunerHosts", `{}`)
-	if created.Code != http.StatusOK || strings.TrimSpace(created.Body.String()) != "{}" {
-		t.Fatalf("POST TunerHosts = %d %q, want 200 empty object", created.Code, created.Body.String())
-	}
+	handlers.RegisterLiveTv(rt, &fakeLiveTvAdmin{}, handlers.LiveTvReads{})
 
 	missing := liveTvRequest(rt, http.MethodDelete, "/LiveTv/Recordings/missing", "")
 	if missing.Code != http.StatusNotFound {
@@ -151,6 +147,50 @@ func TestLiveTvMutationsKeepDocumentedSuccessAndNotFoundShapes(t *testing.T) {
 	}
 	if problem.Title != http.StatusText(http.StatusNotFound) || problem.Status != http.StatusNotFound || problem.Detail != "no tuners configured" {
 		t.Fatalf("missing recording problem = %#v", problem)
+	}
+}
+
+// TestLiveTvTimerMutationsReportNoDvr covers D-122: no timer mutation
+// reports success, because Deadfin stores no timer.
+func TestLiveTvTimerMutationsReportNoDvr(t *testing.T) {
+	rt := router.New()
+	handlers.RegisterLiveTv(rt, &fakeLiveTvAdmin{}, handlers.LiveTvReads{})
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   string
+		want   int
+	}{
+		{http.MethodPost, "/LiveTv/Timers", `{"ProgramId":"p1","ChannelId":"c1"}`, http.StatusBadRequest},
+		{http.MethodPost, "/LiveTv/SeriesTimers", `{"ProgramId":"p1","RecordAnyChannel":true}`, http.StatusBadRequest},
+		{http.MethodPost, "/LiveTv/Timers/t1", `{"Id":"t1","PrePaddingSeconds":60}`, http.StatusNotFound},
+		{http.MethodPost, "/LiveTv/SeriesTimers/s1", `{"Id":"s1","KeepUpTo":3}`, http.StatusNotFound},
+		{http.MethodDelete, "/LiveTv/Timers/t1", "", http.StatusNotFound},
+		{http.MethodDelete, "/LiveTv/SeriesTimers/s1", "", http.StatusNotFound},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			record := liveTvRequest(rt, tc.method, tc.path, tc.body)
+			if record.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%s", record.Code, tc.want, record.Body.String())
+			}
+			if got := record.Header().Get("Content-Type"); got != "text/plain" {
+				t.Fatalf("Content-Type = %q, want text/plain", got)
+			}
+			if got := record.Body.String(); got != "Error processing request." {
+				t.Fatalf("body = %q, want upstream production error text", got)
+			}
+		})
+	}
+
+	for _, path := range []string{"/LiveTv/Timers", "/LiveTv/SeriesTimers"} {
+		record := liveTvRequest(rt, http.MethodGet, path, "")
+		var body dto.QueryResult[json.RawMessage]
+		if err := json.Unmarshal(record.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode %s: %v; body=%s", path, err, record.Body.String())
+		}
+		if body.TotalRecordCount != 0 || len(body.Items) != 0 {
+			t.Fatalf("GET %s after refused mutations = %#v, want no timers", path, body)
+		}
 	}
 }
 

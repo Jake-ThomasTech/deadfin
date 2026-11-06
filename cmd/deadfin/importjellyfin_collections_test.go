@@ -71,3 +71,29 @@ func TestKeepCollectionMetadata(t *testing.T) {
 		t.Errorf("rerun = %v, %v; want no change", warnings, changed)
 	}
 }
+
+// TestKeepCollectionMetadataReplacesMovieTmdbID proves that the Jellyfin
+// collection Tmdb ID (the collection.xml TmdbId) replaces a different stored
+// Tmdb ID, such as a member's movie ID, and that a rerun changes nothing
+// (deadfin#846). Other stored provider IDs stay.
+func TestKeepCollectionMetadataReplacesMovieTmdbID(t *testing.T) {
+	collection := item.Item{Kind: item.KindBoxSet}
+	collection.ProviderIDs.Set("Tmdb", "24")
+	collection.ProviderIDs.Set("Imdb", "kept")
+	value := jfimport.CollectionImport{
+		Name:        "Kill Bill Collection",
+		ProviderIDs: map[string]string{"Tmdb": "2883", "Imdb": "jellyfin"},
+	}
+	if _, changed := keepCollectionMetadata(&collection, value); !changed {
+		t.Fatal("changed = false, want true")
+	}
+	if got, _ := collection.ProviderIDs.Get("Tmdb"); got != "2883" {
+		t.Errorf("Tmdb id = %q, want the Jellyfin collection id 2883", got)
+	}
+	if got, _ := collection.ProviderIDs.Get("Imdb"); got != "kept" {
+		t.Errorf("Imdb id = %q, want the existing value", got)
+	}
+	if _, changed := keepCollectionMetadata(&collection, value); changed {
+		t.Error("rerun changed the collection, want no change")
+	}
+}

@@ -61,6 +61,12 @@ type EncodingOptions struct {
 	HardwareDecodingCodecs                                    []string
 	AllowOnDemandMetadataBasedKeyframeExtractionForExtensions []string
 	HlsAudioSeekStrategy                                      string
+
+	// AllowPlainHttpTranscodeWorkers is Deadfin-only (D-118, #664): true
+	// admits transcode workers over plain HTTP from a non-loopback address.
+	// DEADFIN_TRANSCODE_WORKERS_ALLOW_HTTP wins when it is set. Stock
+	// clients do not send it; a save that omits it keeps the stored value.
+	AllowPlainHttpTranscodeWorkers *bool `json:",omitzero" xml:",omitempty"`
 }
 
 // DefaultEncodingOptions returns the upstream constructor defaults

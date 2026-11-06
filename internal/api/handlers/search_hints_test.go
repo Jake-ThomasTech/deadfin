@@ -49,7 +49,7 @@ func newSearchHintsFixture(t *testing.T) searchHintsFixture {
 		exactMovie: id(20), wordMovie: id(21), otherMovie: id(22), series: id(30), season: id(31), episode: id(32),
 		person: id(40), genre: id(41), anime: id(50),
 	}
-	root := id(10)
+	root, liveTv := id(10), id(60)
 	modified := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	// The DTO builder tags an image by its file name.
 	f.seriesThumb, f.seriesBackdrop, f.episodePrimary = "series-thumb.jpg", "series-backdrop.jpg", "episode.jpg"
@@ -72,6 +72,8 @@ func newSearchHintsFixture(t *testing.T) searchHintsFixture {
 		{ID: f.person, Kind: item.KindPerson, Name: name("Frieren Fan"), SortName: name("frieren fan")},
 		{ID: f.genre, Kind: item.KindGenre, Name: name("Frierenesque"), SortName: name("frierenesque")},
 		{ID: f.anime, Kind: item.KindSeries, IsFolder: true, ParentID: &f.shows, Name: name("Attack on Titan"), SortName: name("attack on titan"), ProviderIDs: anilistProviderIDs("16498")},
+		{ID: id(60), Kind: item.KindUserView, IsFolder: true, SourceType: item.SourceTypeLiveTV, Name: name("Live TV")},
+		{ID: id(61), Kind: item.KindLiveTvChannel, ParentID: &liveTv, SourceType: item.SourceTypeLiveTV, Name: name("FR | France 2"), SortName: name("fr france 2")},
 	}
 	for _, value := range values {
 		if err := items.Upsert(t.Context(), value); err != nil {
@@ -244,4 +246,35 @@ func rawStrings(values map[string]json.RawMessage) map[string]string {
 		out[key] = string(value)
 	}
 	return out
+}
+
+// A Live TV channel is found by the client kind TvChannel, as SharkParty's
+// search asks, and its hint carries Type TvChannel
+// (SearchController.GetSearchHintResult: item.GetBaseItemKind()).
+func TestSearchHintsLiveTvChannelKind(t *testing.T) {
+	f := newSearchHintsFixture(t)
+	channel := itemNamesUUID(t, 961)
+	for _, path := range []string{
+		"/Search/Hints?searchTerm=france%202",
+		"/Search/Hints?searchTerm=france%202&includeItemTypes=LiveTvProgram,TvChannel,Movie",
+	} {
+		result := f.hints(t, f.admin, path)
+		if len(result.SearchHints) != 1 || result.SearchHints[0].ID != channel || result.SearchHints[0].Type != "TvChannel" {
+			t.Fatalf("%s = %+v, want the channel with Type TvChannel", path, result.SearchHints)
+		}
+	}
+	if result := f.hints(t, f.admin, "/Search/Hints?searchTerm=france%202&excludeItemTypes=TvChannel"); len(result.SearchHints) != 0 {
+		t.Fatalf("excludeItemTypes=TvChannel = %+v, want none", result.SearchHints)
+	}
+	var page struct {
+		Items []struct {
+			ID   dto.UUID `json:"Id"`
+			Type string
+		}
+		TotalRecordCount int
+	}
+	body := f.get(t, f.admin, "/Items?userId="+f.admin.String()+"&includeItemTypes=TvChannel&recursive=true", http.StatusOK).Body.Bytes()
+	if err := json.Unmarshal(body, &page); err != nil || page.TotalRecordCount != 1 || len(page.Items) != 1 || page.Items[0].ID != channel || page.Items[0].Type != "TvChannel" {
+		t.Fatalf("/Items includeItemTypes=TvChannel = %s (%v)", body, err)
+	}
 }

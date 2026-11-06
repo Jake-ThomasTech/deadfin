@@ -193,6 +193,37 @@ func TestSlowRequestDiagnosticsFastHandlerEmitsNoWarning(t *testing.T) {
 	}
 }
 
+// countingClock counts the timers that the diagnostics wrapper arms.
+type countingClock struct {
+	clock.Clock
+	mu     sync.Mutex
+	timers int
+}
+
+func (c *countingClock) NewTimer(delay time.Duration) clock.Timer {
+	c.mu.Lock()
+	c.timers++
+	c.mu.Unlock()
+	return c.Clock.NewTimer(delay)
+}
+
+// A transcode-worker route (a long-lived control WebSocket or source stream)
+// arms no slow-request watchdog (#614).
+func TestSlowRequestDiagnosticsSkipsWorkerRoutes(t *testing.T) {
+	stores := newSlowRequestStores(t)
+	t.Cleanup(func() { _ = stores.Close() })
+	counting := &countingClock{Clock: clock.NewFake(time.Date(2026, time.October, 16, 0, 0, 0, 0, time.UTC))}
+	diagnostics := middleware.NewSlowRequestDiagnostics(counting, stores, slog.New(slog.DiscardHandler), slowRequestThreshold)
+	called := false
+	handler := diagnostics.Wrap(router.Route{Method: http.MethodGet, Pattern: "/deadfin/v1/workers/connect", Worker: true}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/deadfin/v1/workers/connect", nil))
+	counting.mu.Lock()
+	defer counting.mu.Unlock()
+	if !called || counting.timers != 0 {
+		t.Fatalf("handler called %t, timers armed %d; want true, 0", called, counting.timers)
+	}
+}
+
 // TestSlowRequestDiagnosticsBlockedHandlerEmitsOneWarning verifies that a
 // blocked handler emits one warning when the fake clock reaches the threshold
 // (acceptance 2) and that a further advance does not emit a second warning

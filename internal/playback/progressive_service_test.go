@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/deadfin-org/deadfin/internal/dto"
+	"github.com/deadfin-org/deadfin/internal/encoding"
 	"github.com/deadfin-org/deadfin/internal/playback"
 	"github.com/deadfin-org/deadfin/internal/sourcefile"
 )
@@ -892,7 +893,7 @@ func TestProgressiveServiceRejectsInvalidRequestsWithoutOpening(t *testing.T) {
 		request func(*playback.ProgressiveRequest)
 		source  playback.MediaSourceInfo
 	}{
-		{name: "unsupported output container", request: func(r *playback.ProgressiveRequest) { r.Container = "mkv" }},
+		{name: "unsupported output container", request: func(r *playback.ProgressiveRequest) { r.Container = "avi" }},
 		{name: "missing play session", request: func(r *playback.ProgressiveRequest) { r.PlaySessionID = "" }},
 		{name: "empty source path", request: func(r *playback.ProgressiveRequest) {}, source: progressiveCopySource("")},
 		{name: "unsafe source path", request: func(r *playback.ProgressiveRequest) {}, source: progressiveCopySource("-not-a-local-path")},
@@ -1132,4 +1133,93 @@ func itoa(value int) string {
 		value /= 10
 	}
 	return string(digits[index:])
+}
+
+// TestProgressiveServiceTranscodesWhenStreamCopyIsImpossible covers #857:
+// PlaybackInfo offers /videos/{id}/stream.{container} as a progressive
+// transcode, so a source that cannot be copied is encoded to H.264 and AAC
+// (VideosController.GetVideoStream).
+func TestProgressiveServiceTranscodesWhenStreamCopyIsImpossible(t *testing.T) {
+	caps := encoding.Capabilities{H264Encoder: "libx264", AACEncoders: []string{"aac"}}
+	for _, tc := range []struct {
+		name        string
+		container   string
+		extension   string
+		contentType string
+	}{
+		{name: "matroska", container: "mkv", extension: ".mkv", contentType: "video/x-matroska"},
+		{name: "mpeg-ts", container: "ts", extension: ".ts", contentType: "video/mp2t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sourceInfo := progressiveCopySource("/media/goldenrec-input.mkv")
+			sourceInfo.MediaStreams[0].Codec = "vc1"
+			source := &progressiveFakeSource{source: sourceInfo}
+			opener := &progressiveFakeOpener{body: io.NopCloser(strings.NewReader("transcode"))}
+			service := playback.NewProgressiveService(playback.ProgressiveServiceConfig{
+				Sources: source, TranscodeDir: "/cache", Opener: opener,
+				Capabilities: func() encoding.Capabilities { return caps },
+			})
+			request := progressiveCopyRequest()
+			request.Container = tc.container
+			request.AllowVideoStreamCopy = false
+			request.AudioCodecs, request.AudioCodec = []string{"aac"}, "aac"
+			videoBitrate := 1_500_000
+			request.VideoBitrate = &videoBitrate
+
+			response, err := service.OpenProgressive(t.Context(), request)
+			if err != nil {
+				t.Fatalf("OpenProgressive() error = %v", err)
+			}
+			if response.ContentType != tc.contentType || !strings.HasSuffix(response.OutputPath, tc.extension) {
+				t.Fatalf("response = %q %q, want %s output with %s", response.ContentType, response.OutputPath, tc.contentType, tc.extension)
+			}
+			args := strings.Join(opener.request.Args, " ")
+			for _, want := range []string{"-codec:v:0 libx264", "-maxrate 1500000", "-codec:a:0 aac", "-ac 6"} {
+				if !strings.Contains(args, want) {
+					t.Errorf("argv %q lacks %q", args, want)
+				}
+			}
+			if last := opener.request.Args[len(opener.request.Args)-1]; last != response.OutputPath {
+				t.Errorf("argv output = %q, want %q", last, response.OutputPath)
+			}
+		})
+	}
+}
+
+func TestProgressiveServiceRefusesTranscodesItCannotEncode(t *testing.T) {
+	subtitleEncode := playback.SubtitleEncode
+	selected := 0
+	caps := encoding.Capabilities{H264Encoder: "libx264", AACEncoders: []string{"aac"}}
+	for _, tc := range []struct {
+		name    string
+		caps    encoding.Capabilities
+		request func(*playback.ProgressiveRequest)
+	}{
+		{name: "no libx264", request: func(*playback.ProgressiveRequest) {}},
+		{name: "HEVC only", caps: caps, request: func(r *playback.ProgressiveRequest) { r.VideoCodecs, r.VideoCodec = []string{"hevc"}, "hevc" }},
+		{name: "subtitle burn-in", caps: caps, request: func(r *playback.ProgressiveRequest) {
+			r.SubtitleDeliveryMethod, r.SubtitleStreamIndex = &subtitleEncode, &selected
+		}},
+		{name: "audio codec without AAC", caps: caps, request: func(r *playback.ProgressiveRequest) {
+			r.AllowAudioStreamCopy = false
+			r.AudioCodecs, r.AudioCodec = []string{"mp3"}, "mp3"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sourceInfo := progressiveCopySource("/media/goldenrec-input.mkv")
+			sourceInfo.MediaStreams[0].Codec = "vc1"
+			source := &progressiveFakeSource{source: sourceInfo}
+			opener := &progressiveFakeOpener{body: io.NopCloser(strings.NewReader("must not open"))}
+			service := playback.NewProgressiveService(playback.ProgressiveServiceConfig{
+				Sources: source, TranscodeDir: "/cache", Opener: opener,
+				Capabilities: func() encoding.Capabilities { return tc.caps },
+			})
+			request := progressiveCopyRequest()
+			request.Container = "mkv"
+			tc.request(&request)
+			if _, err := service.OpenProgressive(t.Context(), request); !errors.Is(err, playback.ErrProgressiveUnsupported) || opener.calls != 0 {
+				t.Fatalf("OpenProgressive() error = %v, opens = %d; want ErrProgressiveUnsupported and no open", err, opener.calls)
+			}
+		})
+	}
 }

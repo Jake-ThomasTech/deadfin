@@ -109,6 +109,51 @@ func TestHLSServiceKeyframeRemuxJoinsSegmentGOPs(t *testing.T) {
 	}
 }
 
+// A transcode worker hand-off (#617) names a segment file index. In a
+// keyframe-cut family that index is a GOP, so the family restarts at the
+// first GOP of the advertised segment that holds it.
+func TestHLSServiceKeyframeRemuxHandoffRestartsAtTheSegmentGOP(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		file      int
+		wantFirst int
+		wantSeek  string
+	}{
+		{name: "first GOP of a segment", file: 2, wantFirst: 2, wantSeek: "00:00:07.500"},
+		{name: "inner GOP of a segment", file: 4, wantFirst: 2, wantSeek: "00:00:07.500"},
+		{name: "last segment", file: 7, wantFirst: 6, wantSeek: "00:00:20.100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service, manager, request := hlsKeyframeRemux(t)
+			request.SegmentIndex = 0
+			if _, err := service.Segment(t.Context(), request); err != nil {
+				t.Fatalf("Segment(0): %v", err)
+			}
+			handoff := manager.lastRestart.Handoff
+			if handoff == nil {
+				t.Fatal("segment job has no Handoff")
+			}
+			if err := handoff(t.Context(), tc.file); err != nil {
+				t.Fatalf("Handoff(%d): %v", tc.file, err)
+			}
+			if got := manager.restartIndexes; len(got) != 2 || got[1] != tc.wantFirst {
+				t.Fatalf("RestartHLSAt indexes = %v, want the hand-off at GOP %d", got, tc.wantFirst)
+			}
+			args := manager.lastRestart.Args
+			if !hlsArgPair(args, "-hls_time", "0") || !hlsArgPair(args, "-start_number", strconv.Itoa(tc.wantFirst)) || !hlsArgPair(args, "-ss", tc.wantSeek) {
+				t.Errorf("hand-off argv = %q, want -hls_time 0, start number %d and seek %q", args, tc.wantFirst, tc.wantSeek)
+			}
+		})
+	}
+	service, manager, request := hlsKeyframeRemux(t)
+	if _, err := service.Segment(t.Context(), request); err != nil {
+		t.Fatalf("Segment: %v", err)
+	}
+	if err := manager.lastRestart.Handoff(t.Context(), 8); !errors.Is(err, playback.ErrProgressiveInvalid) {
+		t.Fatalf("Handoff(8) error = %v, want ErrProgressiveInvalid for a file past the playlist", err)
+	}
+}
+
 func TestHLSServiceKeyframeRemuxServesInitAndRejectsUnknownSegment(t *testing.T) {
 	service, manager, request := hlsKeyframeRemux(t)
 	request.SegmentIndex = -1

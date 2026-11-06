@@ -36,7 +36,12 @@ func NewSlowRequestDiagnostics(clk clock.Clock, stores store.Stores, logger *slo
 }
 
 // Wrap applies the slow-request watchdog to one registered route.
+// Transcode-worker routes are exempt: the control WebSocket and the source
+// stream are long-lived by design and do not use the database.
 func (d *SlowRequestDiagnostics) Wrap(route router.Route, next http.Handler) http.Handler {
+	if route.Worker {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := d.clock.Now()
 		timer := d.clock.NewTimer(d.threshold)

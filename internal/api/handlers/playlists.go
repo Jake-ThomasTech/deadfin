@@ -511,9 +511,22 @@ func (h playlistsHandler) items(w http.ResponseWriter, r *http.Request) {
 		badRequest(w)
 		return
 	}
+	// ItemsQueryRequest leaves UserID unset, so read userId here.
+	requested, err := bind.QueryScalar(r, "userId")
+	if err != nil {
+		badRequest(w)
+		return
+	}
 	viewer := callingUserID(r)
-	if query.UserID != nil && !query.UserID.IsNil() {
-		viewer = *query.UserID
+	if requested != "" {
+		id, err := dto.ParseUUID(requested)
+		if err != nil {
+			badRequest(w)
+			return
+		}
+		if !id.IsNil() {
+			viewer = id
+		}
 	}
 	playlist, ok := h.playlistForUser(w, r, playlistID, viewer)
 	if !ok {

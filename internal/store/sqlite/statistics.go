@@ -245,21 +245,36 @@ func statisticsNeedFullAnalyze(ctx context.Context, conn *sql.Conn) (bool, error
 	if !hasStat1 {
 		return actual > 0, nil
 	}
-	var stat string
-	err := conn.QueryRowContext(ctx, `SELECT stat FROM sqlite_stat1 WHERE tbl = 'items' ORDER BY idx LIMIT 1`).Scan(&stat)
-	if errors.Is(err, sql.ErrNoRows) {
-		return actual > 0, nil
-	}
+	// The first integer of a sqlite_stat1 stat is the number of rows the
+	// index covers: the table row count for a full index, fewer for a partial
+	// one. The largest is the table row count.
+	rows, err := conn.QueryContext(ctx, `SELECT stat FROM sqlite_stat1 WHERE tbl = 'items'`)
 	if err != nil {
 		return false, fmt.Errorf("read items statistics: %w", err)
 	}
-	// The first integer of every sqlite_stat1 stat is the table row count.
-	fields := strings.Fields(stat)
-	if len(fields) == 0 {
-		return true, nil
+	defer func() { _ = rows.Close() }()
+	stored, found := int64(-1), false
+	for rows.Next() {
+		var stat string
+		if err := rows.Scan(&stat); err != nil {
+			return false, fmt.Errorf("read items statistics: %w", err)
+		}
+		found = true
+		fields := strings.Fields(stat)
+		if len(fields) == 0 {
+			continue
+		}
+		if count, err := strconv.ParseInt(fields[0], 10, 64); err == nil {
+			stored = max(stored, count)
+		}
 	}
-	stored, err := strconv.ParseInt(fields[0], 10, 64)
-	if err != nil {
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("read items statistics: %w", err)
+	}
+	if !found {
+		return actual > 0, nil
+	}
+	if stored < 0 {
 		return true, nil
 	}
 	return stored*statisticsDriftFactor < actual || actual*statisticsDriftFactor < stored, nil

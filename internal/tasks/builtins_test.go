@@ -395,3 +395,47 @@ func TestRefreshTrickplayImagesTaskIdentity(t *testing.T) {
 		t.Errorf("RefreshTrickplayImages triggers = %+v, want one daily trigger at 03:00", info.Triggers)
 	}
 }
+
+type testGuide struct {
+	hidden *bool
+	calls  *int
+}
+
+func (g testGuide) RefreshGuide(_ context.Context, progress func(float64)) error {
+	*g.calls++
+	progress(100)
+	return nil
+}
+
+func (g testGuide) Hidden() bool { return *g.hidden }
+
+// TestRefreshGuideTaskIdentity pins upstream RefreshGuideScheduledTask: its
+// derived ID, Key, en-US strings, the 24-hour interval trigger, and IsHidden
+// while no tuner is configured.
+func TestRefreshGuideTaskIdentity(t *testing.T) {
+	c := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	s, _, _, _ := newTestScheduler(t, c)
+	hidden, calls := true, 0
+	if err := tasks.RegisterBuiltins(s, tasks.BuiltinDeps{Guide: testGuide{hidden: &hidden, calls: &calls}}); err != nil {
+		t.Fatalf("RegisterBuiltins: %v", err)
+	}
+	info, ok := s.Get(tasks.RefreshGuideID)
+	if !ok {
+		t.Fatal("RefreshGuide task not registered")
+	}
+	if got, want := info.ID, dotNetGUID("Jellyfin.LiveTv.Guide.RefreshGuideScheduledTask"); got != want {
+		t.Errorf("RefreshGuide ID = %q, want derived %q", got, want)
+	}
+	if info.Key != "RefreshGuide" || info.Name != "Refresh Guide" || info.Category != "Live TV" ||
+		info.Description != "Downloads channel information from live tv services." || !info.IsHidden {
+		t.Errorf("RefreshGuide identity = %+v", info)
+	}
+	if len(info.Triggers) != 1 || info.Triggers[0].Type != tasks.TriggerInterval || info.Triggers[0].IntervalTicks == nil ||
+		*info.Triggers[0].IntervalTicks != int64(24*time.Hour/100) {
+		t.Errorf("RefreshGuide triggers = %+v", info.Triggers)
+	}
+	hidden = false
+	if info, _ := s.Get(tasks.RefreshGuideID); info.IsHidden {
+		t.Error("RefreshGuide hidden with a tuner configured")
+	}
+}

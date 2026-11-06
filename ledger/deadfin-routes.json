@@ -1,6 +1,6 @@
 {
   "format": "deadfin-route-snapshot/v1",
-  "revision": "46fd154a9d1aa4ac0ad91ef3b6bb786489de7090",
+  "revision": "d0325df5c7117a31078dff35ce9dff7ba52ec10b",
   "routes": [
     {
       "Method": "POST",
@@ -138,6 +138,12 @@
       "Method": "DELETE",
       "Pattern": "/Branding/Splashscreen",
       "OperationId": "DeleteCustomSplashscreen",
+      "Policy": "RequiresElevation"
+    },
+    {
+      "Method": "DELETE",
+      "Pattern": "/Devices",
+      "OperationId": "DeleteDevice",
       "Policy": "RequiresElevation"
     },
     {
@@ -394,6 +400,24 @@
     },
     {
       "Method": "GET",
+      "Pattern": "/Devices/Info",
+      "OperationId": "GetDeviceInfo",
+      "Policy": "RequiresElevation"
+    },
+    {
+      "Method": "GET",
+      "Pattern": "/Devices/Options",
+      "OperationId": "GetDeviceOptions",
+      "Policy": "RequiresElevation"
+    },
+    {
+      "Method": "GET",
+      "Pattern": "/Devices",
+      "OperationId": "GetDevices",
+      "Policy": "RequiresElevation"
+    },
+    {
+      "Method": "GET",
       "Pattern": "/Environment/DirectoryContents",
       "OperationId": "GetDirectoryContents",
       "Policy": "FirstTimeSetupOrElevated"
@@ -606,6 +630,12 @@
       "Method": "GET",
       "Pattern": "/System/ActivityLog/Entries",
       "OperationId": "GetLogEntries",
+      "Policy": "RequiresElevation"
+    },
+    {
+      "Method": "GET",
+      "Pattern": "/System/Logs/Log",
+      "OperationId": "GetLogFile",
       "Policy": "RequiresElevation"
     },
     {
@@ -925,6 +955,12 @@
       "Pattern": "/LiveTv/SeriesTimers",
       "OperationId": "GetSeriesTimers",
       "Policy": "LiveTvAccess"
+    },
+    {
+      "Method": "GET",
+      "Pattern": "/System/Logs",
+      "OperationId": "GetServerLogs",
+      "Policy": "RequiresElevation"
     },
     {
       "Method": "GET",
@@ -1303,6 +1339,12 @@
       "Pattern": "/deadfin/v1/build",
       "OperationId": "NATIVE:GetBuild",
       "Anonymous": true
+    },
+    {
+      "Method": "GET",
+      "Pattern": "/deadfin/v1/livetv/tunerhosts/{id}/groups",
+      "OperationId": "NATIVE:GetTunerHostGroups",
+      "Policy": "RequiresElevation"
     },
     {
       "Method": "GET",
@@ -1890,6 +1932,12 @@
       "Method": "POST",
       "Pattern": "/System/Configuration",
       "OperationId": "UpdateConfiguration",
+      "Policy": "RequiresElevation"
+    },
+    {
+      "Method": "POST",
+      "Pattern": "/Devices/Options",
+      "OperationId": "UpdateDeviceOptions",
       "Policy": "RequiresElevation"
     },
     {

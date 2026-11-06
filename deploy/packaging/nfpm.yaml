@@ -1,0 +1,55 @@
+# nfpm config of the deadfin-worker package (#623). Run nfpm from the
+# repository root with the linux deadfin binary at dist/deadfin (from the
+# release image or the same build) and the environment variables
+# DEADFIN_VERSION (for example 0.4.0) and DEADFIN_ARCH (amd64 or arm64).
+# deploy/packaging/package-smoke builds the package and starts the unit in
+# a container.
+name: deadfin-worker
+arch: ${DEADFIN_ARCH}
+platform: linux
+version: ${DEADFIN_VERSION}
+section: video
+priority: optional
+maintainer: Deadfin <deadfin@deadfin.org>
+description: |
+  Deadfin transcode worker. Runs the server's live HLS transcodes on this
+  host with jellyfin-ffmpeg and returns the segments to the server.
+vendor: Deadfin
+homepage: https://deadfin.org
+license: GPL-2.0-only
+contents:
+  - src: dist/deadfin
+    dst: /usr/bin/deadfin
+    file_info:
+      mode: 0755
+  - src: deploy/packaging/deadfin-worker.service
+    dst: /usr/lib/systemd/system/deadfin-worker.service
+    file_info:
+      mode: 0644
+  - src: deploy/packaging/worker.env
+    dst: /etc/deadfin/worker.env
+    type: config|noreplace
+    file_info:
+      mode: 0640
+  - dst: /var/lib/deadfin-worker
+    type: dir
+    file_info:
+      mode: 0750
+  - src: LICENSE
+    dst: /usr/share/doc/deadfin-worker/LICENSE
+scripts:
+  preinstall: deploy/packaging/preinstall.sh
+  postinstall: deploy/packaging/postinstall.sh
+  preremove: deploy/packaging/preremove.sh
+overrides:
+  deb:
+    depends:
+      # The worker's ffmpeg major version must equal the server's.
+      - jellyfin-ffmpeg8
+      - libvips42
+      - ca-certificates
+  rpm:
+    depends:
+      - jellyfin-ffmpeg8
+      - vips
+      - ca-certificates

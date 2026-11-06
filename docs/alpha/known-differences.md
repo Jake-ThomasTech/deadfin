@@ -15,13 +15,10 @@ real problem, report it anyway and tell us why.
 - **The first-run wizard is open only on your local network** (D-53). Through
   a reverse proxy or from another network, use the setup link from the
   server log. See [install.md](install.md#first-run-setup-and-the-setup-link).
-- **Forwarded client addresses are not trusted.** Deadfin ignores
-  `X-Forwarded-For` and the Known Proxies setting. Behind a proxy, every
-  client shows the proxy's address.
 - **QuickConnect has limits** (D-55). One address can have at most 16 open
   QuickConnect requests, and the server at most 256. Past that, new requests
-  fail with "429" until old ones expire (10 minutes). Behind a proxy all
-  clients share one address.
+  fail with "429" until old ones expire (10 minutes). Behind a proxy that
+  is not in Known Proxies, all clients share the proxy's address.
 - **Remote image downloads refuse local addresses** (D-27). "Download
   image" accepts any http or https URL, but not one on your own network or
   `localhost`, such as a NAS. The error names the reason. Upload the image

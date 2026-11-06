@@ -82,7 +82,7 @@ func (starts *hlsAudioStarts) startsLate(ctx context.Context, source MediaSource
 // AAC when the client accepts AAC, else to the source codec when it is AC3 or
 // E-AC3. Any other copy stays a copy.
 func (service *HLSService) padLateAudio(ctx context.Context, source MediaSourceInfo, audio *MediaStream, request HLSRequest, job *encoding.HLSJob) {
-	if audio == nil || request.Live || job.OutputAudioCodec == "" || !service.audioStarts.startsLate(ctx, source, audio) {
+	if audio == nil || request.Live || request.LiveStreamID != "" || job.OutputAudioCodec == "" || !service.audioStarts.startsLate(ctx, source, audio) {
 		return
 	}
 	if job.OutputAudioCodec == "copy" {

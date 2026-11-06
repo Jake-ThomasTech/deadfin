@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,4 +281,82 @@ func loadConfigurationStockFixture(t *testing.T, key string) map[string]any {
 		t.Fatalf("unmarshal stock %s: %v", key, err)
 	}
 	return result
+}
+
+// livetvMarker is a synthetic panel password; no non-admin response may
+// carry it (D-69).
+const livetvMarker = "MARKERpw-7b1e"
+
+func saveLiveTvWithCredentials(t *testing.T, manager *config.Manager) {
+	t.Helper()
+	err := manager.UpdateLiveTv(t.Context(), func(options *config.LiveTvOptions) error {
+		host := config.DefaultTunerHostInfo()
+		host.Id, host.Type = "0123456789abcdef0123456789abcdef", "m3u"
+		host.Url = "http://panel.test/get.php?username=alice&password=" + livetvMarker + "&type=m3u_plus"
+		provider := config.DefaultListingsProviderInfo()
+		provider.Id, provider.Type = "fedcba9876543210fedcba9876543210", "xmltv"
+		provider.Path = "http://panel.test/xmltv.php?username=alice&password=" + livetvMarker
+		provider.Username, provider.Password = "alice", livetvMarker
+		options.TunerHosts = []config.TunerHostInfo{host}
+		options.ListingProviders = []config.ListingsProviderInfo{provider}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("UpdateLiveTv: %v", err)
+	}
+}
+
+func TestConfigurationGetNamedConfigurationLiveTvRedactsCredentialsForUsers(t *testing.T) {
+	rt, manager := newConfigurationRouter(t, authenticatedConfigUser())
+	saveLiveTvWithCredentials(t, manager)
+	rec := request(rt, http.MethodGet, "/System/Configuration/livetv", "", "", "")
+	assertStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	if strings.Contains(body, livetvMarker) || strings.Contains(body, "alice") {
+		t.Fatalf("non-admin livetv configuration leaks a credential: %s", body)
+	}
+	if !strings.Contains(body, "panel.test/get.php?username=***") {
+		t.Fatalf("tuner URL missing or not masked: %s", body)
+	}
+}
+
+func TestConfigurationGetNamedConfigurationLiveTvKeepsCredentialsForAdministrators(t *testing.T) {
+	admin := authenticatedConfigUser()
+	admin.Administrator = true
+	rt, manager := newConfigurationRouter(t, admin)
+	saveLiveTvWithCredentials(t, manager)
+	rec := request(rt, http.MethodGet, "/System/Configuration/livetv", "", "", "")
+	assertStatus(t, rec, http.StatusOK)
+	var got config.LiveTvOptions
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ListingProviders[0].Password != livetvMarker || !strings.Contains(got.TunerHosts[0].Url, livetvMarker) {
+		t.Fatalf("admin configuration was masked: %s", rec.Body.String())
+	}
+}
+
+func TestConfigurationGetNamedConfigurationLiveTvDefaults(t *testing.T) {
+	rt, _ := newConfigurationRouter(t, authenticatedConfigUser())
+	rec := request(rt, http.MethodGet, "/System/Configuration/livetv", "", "", "")
+	assertStatus(t, rec, http.StatusOK)
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := map[string]any{
+		"EnableRecordingSubfolders":                false,
+		"EnableOriginalAudioWithEncodedRecordings": false,
+		"TunerHosts":                      []any{},
+		"ListingProviders":                []any{},
+		"PrePaddingSeconds":               float64(0),
+		"PostPaddingSeconds":              float64(0),
+		"MediaLocationsCreated":           []any{},
+		"RecordingPostProcessorArguments": `"{path}"`,
+		"SaveRecordingNFO":                true,
+		"SaveRecordingImages":             true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("livetv defaults = %#v, want %#v", got, want)
+	}
 }

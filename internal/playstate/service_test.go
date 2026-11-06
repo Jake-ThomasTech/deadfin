@@ -813,6 +813,7 @@ type playstateServiceFixture struct {
 	items          *store.ItemStore
 	sessions       *session.Manager
 	users          playstateServiceUsers
+	configuration  playstateServiceConfiguration
 	changes        *events.Bus[playstate.UserDataChanged]
 	subscription   *events.Subscription[playstate.UserDataChanged]
 	application    playstate.Application
@@ -910,6 +911,7 @@ func newPlaystateServiceFixture(t *testing.T, kind item.Kind) playstateServiceFi
 		items:          items,
 		sessions:       sessions,
 		users:          users,
+		configuration:  configuration,
 		changes:        changes,
 		subscription:   subscription,
 		application:    application,
@@ -1086,5 +1088,30 @@ func (fixture playstateServiceFixture) assertEvents(t *testing.T, want int) {
 	case extra := <-fixture.subscription.Events():
 		t.Fatalf("unexpected extra user-data change event %#v", extra)
 	default:
+	}
+}
+
+// Source: SessionManager.cs:1059-1070. A stop with a negative position is
+// rejected, but it still releases the live stream so a stalled client does
+// not hold a tuner.
+func TestServiceNegativeStopReleasesLiveStream(t *testing.T) {
+	fixture := newPlaystateServiceFixture(t, item.KindMovie)
+	var closed []string
+	if err := fixture.sessions.SetOptions(session.Options{CloseLiveStream: func(_ context.Context, id string) error {
+		closed = append(closed, id)
+		return nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.sessions.StartPlayback(t.Context(), fixture.actor.Target, session.PlaybackState{ItemID: fixture.item.ID, LiveStreamID: "live-1", PlaySessionID: "play-1"}); err != nil {
+		t.Fatal(err)
+	}
+	position := int64(-1)
+	report := playstate.Report{PlaybackState: session.PlaybackState{ItemID: fixture.item.ID, PositionTicks: &position, LiveStreamID: "live-1"}}
+	if err := fixture.application.Stop(t.Context(), fixture.actor, report); err == nil {
+		t.Fatal("negative stop position returned nil error")
+	}
+	if !reflect.DeepEqual(closed, []string{"live-1"}) {
+		t.Fatalf("closed %v, want [live-1]", closed)
 	}
 }

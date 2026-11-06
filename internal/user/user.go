@@ -454,8 +454,41 @@ func (s *Service) UpdatePolicy(ctx context.Context, userID dto.UUID, document js
 	if err != nil {
 		return err
 	}
+	document, err = keepDeadfinPolicyFields(account.Policy, document)
+	if err != nil {
+		return ErrBadRequest
+	}
 	account.Policy = append(account.Policy[:0], document...)
 	return s.Update(ctx, account)
+}
+
+// keepDeadfinPolicyFields copies each Deadfin-only UserPolicy member of
+// previous that document omits into document. Stock clients do not send
+// these members, so their saves keep the stored values (D-105).
+func keepDeadfinPolicyFields(previous, document json.RawMessage) (json.RawMessage, error) {
+	if len(previous) == 0 {
+		return document, nil
+	}
+	var stored map[string]json.RawMessage
+	if json.Unmarshal(previous, &stored) != nil {
+		return document, nil
+	}
+	var next map[string]json.RawMessage
+	if err := json.Unmarshal(document, &next); err != nil {
+		return nil, err
+	}
+	changed := false
+	for _, name := range []string{"LimitLiveTvToSharedLists"} {
+		value, ok := stored[name]
+		if _, sent := next[name]; ok && !sent {
+			next[name] = value
+			changed = true
+		}
+	}
+	if !changed {
+		return document, nil
+	}
+	return json.Marshal(next)
 }
 
 // UpdateUser ports UserController.UpdateUser: it authorizes like
