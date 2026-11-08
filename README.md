@@ -111,7 +111,7 @@ the web client. To use jellyfin-web instead, see
 **3. Run Deadfin.** `:alpha` follows the newest release or release
 candidate. To control upgrades, put a tag from the
 [tags page](https://github.com/deadfin-org/deadfin/tags) in its place, for
-example `ghcr.io/deadfin-org/deadfin:v0.3.1`.
+example `ghcr.io/deadfin-org/deadfin:v0.4.0-rc.1`.
 
 ```yaml
 # compose.yaml
