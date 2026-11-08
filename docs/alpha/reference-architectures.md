@@ -11,7 +11,7 @@ describes. Addresses below are examples; use your own.
 | Database | SQLite or PostgreSQL | PostgreSQL (required for replicas) |
 | TLS proxy | none on a LAN; **required** for remote access (Caddy on the same host) | Caddy on both hosts, one shared certificate |
 | Client address | the host | a floating IP (keepalived) |
-| Survives | nothing: a host restart stops playback | a proxy or host failure, and a rolling update |
+| Survives | nothing: a host restart stops playback | a proxy or host failure, and a rolling update (running transcodes only with a transcode worker) |
 | Minimum version | any | v0.4.0 (server replicas, D-121) |
 
 ## 1. Single node
@@ -185,6 +185,15 @@ floating IP's name.
   on SSD, read-write for both hosts and owned by the container user
   (65532).
 
+  "Remote" means the job runs on a
+  [transcode worker](../transcode-workers.md). With no worker, each
+  replica runs FFmpeg itself (the default `local` placement mode), and
+  that job stops when its replica stops or its host fails, shared
+  directory or not: the client has to start playback again. To keep
+  running transcodes through a failover or a rolling update, add at least
+  one worker that isn't on either replica host, point it at the floating
+  IP's name, and set `DEADFIN_TRANSCODE_WORKER_MODE=workers-first`.
+
   ⚠️ Mount the share on the **`cache`** directory, not on
   `cache/transcodes`. Deadfin deletes and recreates `cache/transcodes` at
   start, which fails on a mount point
@@ -192,11 +201,21 @@ floating IP's name.
   container restarts in a loop.
 
   ```yaml
-  volumes:
-    - ./data:/var/lib/deadfin
-    - /mnt/deadfin-transcodes:/var/lib/deadfin/cache
-    - /mnt/media:/mnt/media:ro
+  services:
+    deadfin:
+      ports:
+        - "10.0.50.11:8096:8096"   # this host's private address; 10.0.50.12 on node B
+      environment:
+        DEADFIN_REPLICA_URL: http://10.0.50.11:8096   # http://10.0.50.12:8096 on node B
+      volumes:
+        - ./data:/var/lib/deadfin
+        - /mnt/deadfin-transcodes:/var/lib/deadfin/cache
+        - /mnt/media:/mnt/media:ro
   ```
+
+  Publish 8096 on the private address only. Caddy on the host and the
+  other replica reach the container through it; without the mapping the
+  proxy returns 502 and requests forwarded between replicas fail.
 
 ### Caddy on both nodes
 
@@ -232,12 +251,23 @@ media.example.com:8920 {
 	}
 	reverse_proxy 10.0.50.11:8096 10.0.50.12:8096 {
 		lb_policy first               # node A first; node B when A fails its health check
+		lb_try_duration 5s            # retry a failed connection on the other replica
+		lb_try_interval 250ms
+		fail_duration 30s             # passive check: a failed request marks the replica down
 		health_uri /System/Info/Public
 		health_interval 10s
 		flush_interval -1
 	}
 }
 ```
+
+- The active health check alone leaves a gap: if node A's replica or host
+  fails between two probes, `lb_policy first` keeps choosing it, and Caddy
+  returns 502 until the next probe, even though node B is up. Caddy
+  doesn't retry or track failures by default. `lb_try_duration` makes it
+  try the other replica when a connection fails, and `fail_duration` takes
+  a replica out of rotation after a failed request. Moving the floating IP
+  doesn't help here, because both nodes' Caddy pick from the same list.
 
 - `KnownProxies` on both replicas: the private-network addresses of both
   hosts (`10.0.50.11`, `10.0.50.12`). That is the address Deadfin sees
@@ -262,9 +292,9 @@ vrrp_instance DEADFIN_EDGE {
 	virtual_router_id 60
 	priority 150                     # node A; 100 on node B
 	advert_int 1
-	unicast_src_ip 10.0.60.11
+	unicast_src_ip 10.0.60.11        # node B: 10.0.60.12
 	unicast_peer {
-		10.0.60.12
+		10.0.60.12                   # node B: 10.0.60.11
 	}
 	authentication {
 		auth_type PASS
@@ -293,6 +323,14 @@ traffic with nftables, matched on the Compose bridge
 - allow replies, PostgreSQL, the peer replica's port, and anything outside
   the private ranges (metadata providers);
 - drop the rest of the private network (NAS, DNS servers, other hosts).
+
+Name resolution: on a user-defined Compose network, Docker's embedded DNS
+server forwards lookups to the host's resolvers from the host itself, so
+the filter doesn't see them; we checked that metadata names resolve with
+the filter loaded. If the container sends DNS straight to a server
+instead (a `dns:` entry in Compose, or another runtime), allow UDP and
+TCP 53 to that one resolver before the drop rule, or metadata and image
+requests fail.
 
 Load it from its own table and systemd unit ordered before
 `docker.service`. Rules in `DOCKER-USER` are lost at every reboot, and
