@@ -826,9 +826,13 @@ func (connection *connection) startKeepAlive() {
 					connection.cancel()
 					return
 				case elapsed > keepAliveForce:
+					// Re-arm before the send: a peer that sees the
+					// message must also see the next sweep scheduled.
+					timer.Reset(keepAliveSweep)
 					if !connection.send(MessageForceKeepAlive, int(keepAliveTimeout/time.Second)) {
 						return
 					}
+					continue
 				}
 				timer.Reset(keepAliveSweep)
 			}
