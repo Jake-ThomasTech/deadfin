@@ -51,7 +51,7 @@ Use SQLite unless you already run PostgreSQL. SQLite is the default: one
 file, `data/deadfin.db`, under the data directory, and no setup. Keep it on
 local or block storage, not NFS or SMB.
 
-PostgreSQL (tested on 17) suits an operator who already runs and backs up a
+PostgreSQL (tested on 17 and 18) suits an operator who already runs and backs up a
 PostgreSQL server. Set `DEADFIN_DATABASE_URL`. Choose at install time: a
 server that changes the setting later starts with an empty database. Both
 run one Deadfin process per data directory (D-06). See

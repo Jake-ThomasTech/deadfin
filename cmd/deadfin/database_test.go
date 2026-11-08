@@ -33,6 +33,7 @@ func TestParseDatabase(t *testing.T) {
 		{name: "unknown scheme", raw: "mysql://root:secret@db/deadfin", err: `scheme "mysql" is not supported`},
 		{name: "sqlite scheme", raw: "sqlite:///data/deadfin.db", err: `scheme "sqlite" is not supported`},
 		{name: "keyword form", raw: "host=db password=secret", err: "is not a valid URL"},
+		{name: "multi-host", raw: "postgres://deadfin:secret@pg-a:5432,pg-b:5432/deadfin?target_session_attrs=read-write", postgres: "postgres://deadfin:secret@pg-a:5432,pg-b:5432/deadfin?target_session_attrs=read-write"},
 		{name: "invalid URL", raw: "postgres://deadfin:secret@db:port/x", err: "is not a valid URL"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,6 +64,7 @@ func TestDatabaseStringRedactsPassword(t *testing.T) {
 	}{
 		{"postgres://deadfin:secret@db:5432/deadfin?sslmode=disable", "PostgreSQL postgres://deadfin:xxxxx@db:5432/deadfin?sslmode=disable"},
 		{"postgres://deadfin@db/deadfin", "PostgreSQL postgres://deadfin@db/deadfin"},
+		{"postgres://deadfin:secret@pg-a:5432,pg-b:5432/deadfin?target_session_attrs=read-write", "PostgreSQL postgres://deadfin:xxxxx@pg-a:5432,pg-b:5432/deadfin?target_session_attrs=read-write"},
 		{"postgres://db/deadfin?password=secret&user=deadfin", "PostgreSQL postgres://db/deadfin?password=xxxxx&user=deadfin"},
 		{"postgres://deadfin:s%40cr%3At@db/deadfin", "PostgreSQL postgres://deadfin:xxxxx@db/deadfin"},
 	} {

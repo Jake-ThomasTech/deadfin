@@ -237,6 +237,51 @@ func TestRefreshLibraryProgressEmitsIntermediateValue(t *testing.T) {
 	}
 }
 
+// TestRefreshLibraryFirstScanAtOneHourAfterStart pins the start behavior of
+// the library scan (#876). Upstream RefreshMediaLibraryTask has one default
+// trigger, a 12-hour interval (RefreshMediaLibraryTask.cs GetDefaultTriggers),
+// and a never-completed interval trigger first fires one hour after start
+// (IntervalTrigger.cs:44-48). Thus the server does not scan at start, also
+// after import-jellyfin writes libraries.
+func TestRefreshLibraryFirstScanAtOneHourAfterStart(t *testing.T) {
+	c := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	s, _, _, _ := newTestScheduler(t, c)
+
+	scanned := make(chan struct{}, 1)
+	if err := tasks.RegisterBuiltins(s, tasks.BuiltinDeps{
+		ScanLibrary: testProgressScanLibrary{fn: func(context.Context, func(float64)) (any, error) {
+			select {
+			case scanned <- struct{}{}:
+			default:
+			}
+			return nil, nil
+		}},
+	}); err != nil {
+		t.Fatalf("RegisterBuiltins: %v", err)
+	}
+	info, ok := s.Get(tasks.RefreshLibraryID)
+	if !ok {
+		t.Fatal("RefreshLibrary task not registered")
+	}
+	if len(info.Triggers) != 1 || info.Triggers[0].Type != tasks.TriggerInterval ||
+		info.Triggers[0].IntervalTicks == nil || *info.Triggers[0].IntervalTicks != int64(12*time.Hour/100) {
+		t.Fatalf("RefreshLibrary triggers = %+v, want one 12-hour IntervalTrigger", info.Triggers)
+	}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Startup triggers fire 3 seconds after Start; the scan does not.
+	c.Advance(time.Minute)
+	assertNotFired(t, scanned, "library scan ran at start")
+
+	c.Advance(time.Hour - time.Minute - time.Second)
+	assertNotFired(t, scanned, "library scan ran before one hour")
+
+	c.Advance(time.Second)
+	waitForRan(t, scanned, "library scan at one hour after start")
+}
+
 // TestRefreshMetadataProgressEmitsIntermediateValue proves the RefreshMetadata
 // runnable forwards the progress callback to MetadataRefresher.RefreshMetadata.
 // The fake worker emits an intermediate value before it blocks. While the

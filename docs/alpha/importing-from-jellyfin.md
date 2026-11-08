@@ -61,9 +61,11 @@ stock Jellyfin Docker install with its config at `./jellyfin/config`.
      import-jellyfin --jellyfin-db /import/jellyfin.db --jellyfin-root /import/root-default
    ```
 
-5. **Start Deadfin and scan.** Dashboard → Libraries → Scan All Libraries, or
-   wait for the scan that starts with the server. Wait until the scan is
-   done. With `TMDB_API_KEY` set, let the metadata refresh finish too: watch
+5. **Start Deadfin and scan.** Start the scan by hand: Dashboard →
+   Libraries → Scan All Libraries. The server does not scan when it starts.
+   As in Jellyfin, the scheduled task Scan Media Library first runs one hour
+   after the server starts, then 12 hours after its last run. Wait until the
+   scan is done. With `TMDB_API_KEY` set, let the metadata refresh finish too: watch
    state for movies and shows matches best when the items have provider IDs.
 
 6. **Stop Deadfin and import again.** This run matches watch state to the

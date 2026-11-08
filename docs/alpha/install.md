@@ -78,7 +78,7 @@ Deadfin stores its library, users and watch state in SQLite or PostgreSQL.
 
 - **SQLite** is the default. Leave `DEADFIN_DATABASE_URL` empty and Deadfin
   keeps one file, `data/deadfin.db`, under the data directory.
-- **PostgreSQL** (tested on 17): set `DEADFIN_DATABASE_URL` to a connection URL,
+- **PostgreSQL** (tested on 17 and 18): set `DEADFIN_DATABASE_URL` to a connection URL,
   for example `postgres://deadfin:secret@postgres:5432/deadfin?sslmode=disable`.
   The user needs the `CREATE` privilege on the schema Deadfin uses
   (`public` unless the URL sets `search_path`); the database owner has it.
@@ -197,6 +197,19 @@ services:
 
 The CLI commands, for example `docker compose run --rm deadfin add-library`,
 read `DEADFIN_DATABASE_URL` from the same service and use the same database.
+
+### PostgreSQL with a primary and replicas
+
+For Patroni or another primary/replica cluster, list each node in the URL
+and add `target_session_attrs=read-write`. Deadfin then connects to the node
+that accepts writes, with no virtual IP or HAProxy:
+
+```
+DEADFIN_DATABASE_URL=postgres://deadfin:change-me@pg-a:5432,pg-b:5432/deadfin?target_session_attrs=read-write&sslmode=disable
+```
+
+This setup is tested on a two-node Patroni cluster with PostgreSQL 18: a
+fresh install, `import-jellyfin`, a full scan and transcodes.
 
 ## First-run setup and the setup link
 

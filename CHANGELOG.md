@@ -13,6 +13,23 @@ newest release or release candidate. `:latest` follows the newest release.
 
 ## [Unreleased]
 
+### Added
+
+- The install guide has an example for PostgreSQL with a primary and
+  replicas (Patroni): a URL that lists each node, with
+  `target_session_attrs=read-write` (#877).
+
+### Changed
+
+- The docs name PostgreSQL 17 and 18 as tested (#877).
+
+### Fixed
+
+- The Jellyfin import guide said that a scan starts with the server. The
+  server does not scan at start; as in Jellyfin, the scheduled Scan Media
+  Library task first runs one hour after start. Step 5 now says to start the
+  scan by hand, and a test pins the schedule (#876).
+
 ## [0.4.0-rc.1] - 2026-11-06
 
 First release candidate for v0.4.0. It adds Live TV, transcode workers,
