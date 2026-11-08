@@ -13,8 +13,13 @@ git tag 0.2.0
 git tag v0.2.1
 git tag v0.3.0-rc.1
 git tag 0.3.0-rc.12
-test "$("$helper" master | sed -n 's/^publication_tag=//p')" = "$sha"
-test "$("$helper" master | sed -n 's/^channel=//p')" = master
+# Master publishes a UTC commit-time tag that no release-line tag can match.
+for ref in master refs/heads/master; do
+  test "$("$helper" "$ref" | sed -n 's/^publication_tag=//p')" = "master-20261018051500-$(printf '%s' "$sha" | cut -c1-12)"
+  test "$("$helper" "$ref" | sed -n 's/^version=//p')" = "dev-$(printf '%s' "$sha" | cut -c1-12)"
+  test "$("$helper" "$ref" | sed -n 's/^channel=//p')" = master
+  test "$("$helper" "$ref" | sed -n 's/^source_branch=//p')" = master
+done
 test "$("$helper" train/0.2.0 | sed -n 's/^publication_tag=//p')" = "train-0.2.0-$sha"
 test "$("$helper" train/v0.2.3 | sed -n 's/^publication_tag=//p')" = "train-v0.2.3-$sha"
 test "$("$helper" train/v0.2.3 | sed -n 's/^version=//p')" = "v0.2.3-dev-$(printf '%s' "$sha" | cut -c1-12)"

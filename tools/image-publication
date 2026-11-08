@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Resolve one immutable build identity. Release authority is the train tag.
 # A release-line branch vX.Y publishes channel dev under the sortable tag
-# X.Y.0-dev.<commit time, UTC yyyymmddHHMMSS>-<sha12>.
+# X.Y.0-dev.<commit time, UTC yyyymmddHHMMSS>-<sha12>. Master publishes
+# master-<the same stamp>-<sha12>, so a Flux policy can order master builds.
 set -euo pipefail
 ref=${1:?ref required}
 sha=$(git rev-parse HEAD)
+stamp=$(TZ=UTC git show -s --date=format-local:%Y%m%d%H%M%S --format=%cd "$sha")
 semver='^(v)?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 rc='^(v)?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.([1-9][0-9]*)$'
 case "$ref" in
   master|refs/heads/master)
-    source_branch=master; publication_tag=$sha; version="dev-${sha:0:12}"; channel=master ;;
+    source_branch=master; publication_tag="master-${stamp}-${sha:0:12}"; version="dev-${sha:0:12}"; channel=master ;;
   train/*|refs/heads/train/*)
     source_branch=${ref#refs/heads/}; train=${source_branch#train/}
     [[ $train =~ $semver ]] || { echo 'train must name a finite X.Y.Z release' >&2; exit 1; }
@@ -17,7 +19,6 @@ case "$ref" in
   v[0-9]*|refs/heads/v[0-9]*)
     source_branch=${ref#refs/heads/}; line=${source_branch#v}
     [[ $line =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'release line must name a vX.Y branch' >&2; exit 1; }
-    stamp=$(TZ=UTC git show -s --date=format-local:%Y%m%d%H%M%S --format=%cd "$sha")
     version="${line}.0-dev.${stamp}-${sha:0:12}"; publication_tag=$version; channel=dev ;;
   refs/tags/*)
     tag=${ref#refs/tags/}
