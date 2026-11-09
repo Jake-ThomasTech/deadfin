@@ -9,6 +9,7 @@ describes. Addresses below are examples; use your own.
 |---|---|---|
 | Hosts | 1 | 2 |
 | Database | SQLite or PostgreSQL | PostgreSQL (required for replicas) |
+| Shared storage | none | data root and transcode directory on NFS, both hosts read-write |
 | TLS proxy | none on a LAN; **required** for remote access (Caddy on the same host) | Caddy on both hosts, one shared certificate |
 | Client address | the host | a floating IP (keepalived) |
 | Survives | nothing: a host restart stops playback | a proxy or host failure, and a rolling update (running transcodes only with a transcode worker) |
@@ -120,7 +121,7 @@ LAN clients (local DNS) ────────────────┤
   Deadfin replica  :8096                           Deadfin replica  :8096
             │      └──── replica traffic, private network ────┘      │
             └──────────── PostgreSQL (primary/replica) ──────────────┘
-                 shared transcode directory (NFS)   media (read-only NFS)
+         shared data root + transcode directory (NFS)   media (read-only NFS)
 ```
 
 Two hosts each run a Deadfin replica and Caddy. keepalived moves one
@@ -177,9 +178,44 @@ floating IP's name.
   private network, for example `http://10.0.50.11:8096` and
   `http://10.0.50.12:8096`. Replica requests are signed with a key that
   Deadfin keeps in the database.
-- **Data root:** _TODO: waiting for the maintainer's answer on whether
-  replicas share the data root (settings, library folders, collections,
-  images) or keep one each. See issue #26._
+- **Data root: share one between the replicas** (#26). It holds the
+  settings (`config/*.xml`), the library folders (`root/default`),
+  collections, playlists, trickplay and local images (`metadata`). A
+  separate data root per replica is **not safe**: a replica that reads the
+  library list and doesn't find a library's folder on its own disk deletes
+  that library from the database, and the other replica then adds it back
+  with a new ID. Images and the other files are not copied between
+  replicas either.
+
+  We export the data root from the NAS over NFS v4.2, read-write for both
+  hosts, at the same path on both. Settings files are written to a
+  temporary file and renamed, so a replica never reads half a file.
+
+  - **Stop a replica from starting on an empty data root.** If the NFS
+    share isn't mounted, the mount point is an empty local folder, and
+    starting on it would delete the libraries as described above. Bind a
+    *subfolder* of the share with `create_host_path: false` (example
+    below): when the share isn't mounted the subfolder doesn't exist and
+    Docker refuses to start the container. Order Docker after the mount
+    (`After=` and `Wants=` on the mount unit in a `docker.service`
+    drop-in).
+  - With root squash on the export, Docker stats the bind source as
+    `nobody`. Give the share's top folder execute for others (`0751`) so
+    the check can pass; the data root's own folders stay `0700`.
+  - Keep `log/` on each host's local disk. Both replicas name their log
+    files the same way.
+
+  Two limits in v0.4.0:
+
+  - **Settings reach the other replica only when it restarts.** Each
+    replica reads the settings files once, at start, and a later save on
+    the other replica writes its old copy back. Make settings, library
+    and plugin changes on one replica, then restart the other one.
+    Library folders and library options are read from disk each time, so
+    those agree at once.
+  - **Both replicas run the scheduled tasks** (library scan every 12 hours,
+    metadata refresh, trickplay, cleanup), and the schedule is shared, so
+    they can't be staggered. Start a manual scan on one replica only.
 - **Transcode directory:** share it between the replicas, so a remote HLS
   job moves to the other replica without restarting. We use an NFS export
   on SSD, read-write for both hosts and owned by the container user
@@ -208,7 +244,12 @@ floating IP's name.
       environment:
         DEADFIN_REPLICA_URL: http://10.0.50.11:8096   # http://10.0.50.12:8096 on node B
       volumes:
-        - ./data:/var/lib/deadfin
+        - type: bind                  # shared data root (NFS), see above
+          source: /mnt/deadfin-data/deadfin
+          target: /var/lib/deadfin
+          bind:
+            create_host_path: false   # share not mounted = container doesn't start
+        - ./log:/var/lib/deadfin/log  # per host
         - /mnt/deadfin-transcodes:/var/lib/deadfin/cache
         - /mnt/media:/mnt/media:ro
   ```
@@ -269,9 +310,11 @@ media.example.com:8920 {
   a replica out of rotation after a failed request. Moving the floating IP
   doesn't help here, because both nodes' Caddy pick from the same list.
 
-- `KnownProxies` on both replicas: the private-network addresses of both
-  hosts (`10.0.50.11`, `10.0.50.12`). That is the address Deadfin sees
-  for Caddy, because Caddy reaches the replicas over the private network.
+- `KnownProxies`: the private-network addresses of both hosts
+  (`10.0.50.11`, `10.0.50.12`). That is the address Deadfin sees for
+  Caddy, because Caddy reaches the replicas over the private network. The
+  setting is in the shared data root, so set it once and restart the
+  other replica.
 
 ### keepalived
 
@@ -312,6 +355,11 @@ vrrp_instance DEADFIN_EDGE {
 Measured on our pair: stopping Caddy on node A moved the floating IP to
 node B and served requests again within 4 s, with the same certificate.
 The IP returned to node A 7 s after Caddy started there again.
+Stopping node A's Deadfin replica (`docker compose stop`, as in a rolling
+update) while requesting `/System/Info/Public` through the floating IP
+every 0.5 s: 90 of 90 requests answered 200 during the 16 s it was down.
+Node A's replica logged `replica drained; its sessions and jobs are free
+for the peers` before it stopped.
 
 ### Containing the replica (optional)
 
@@ -342,3 +390,14 @@ On Alder Lake iGPUs (UHD 770), Ubuntu leaves GuC submission off. HEVC
 10-bit decode together with a QSV encode then hangs the video engine
 (`GPU HANG … hevc_qsv`). Add `i915.enable_guc=3` to the kernel command line.
 Gen12 iGPUs decode AV1 but can't encode it.
+
+### Replicas with different GPUs
+
+The encoding settings are in the shared data root, so both replicas use
+the same ones. In v0.4.0-rc.1 a replica doesn't check its own encoder
+before choosing a codec: with **Allow AV1 encoding** on, a replica whose
+GPU can't encode AV1 (UHD 770 next to an Arc A380, for example) starts
+`av1_qsv` for a client that prefers AV1, FFmpeg fails
+(`Current profile is unsupported`), and the segment request returns 500
+(#22). Use GPUs with the same encoders on both replicas, or turn off AV1
+encoding.
