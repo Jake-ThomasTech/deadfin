@@ -13,7 +13,7 @@ describes. Addresses below are examples; use your own.
 | TLS proxy | none on a LAN; **required** for remote access (Caddy on the same host) | Caddy on both hosts, one shared certificate |
 | Client address | the host | a floating IP (keepalived) |
 | Survives | nothing: a host restart stops playback | a proxy or host failure, and a rolling update (running transcodes only with a transcode worker) |
-| Minimum version | any | v0.4.0 (server replicas, D-121) |
+| Minimum version | any | v0.4.0-rc.1 (server replicas, D-121) |
 
 ## 1. Single node
 
@@ -68,7 +68,7 @@ Example `compose.yaml`:
 ```yaml
 services:
   deadfin:
-    image: ghcr.io/deadfin-org/deadfin:v0.4.0@sha256:<digest>
+    image: ghcr.io/deadfin-org/deadfin:v0.4.0-rc.1@sha256:<digest>
     restart: unless-stopped
     env_file: .env                # TMDB_API_KEY, optional DEADFIN_DATABASE_URL
     devices:
@@ -178,7 +178,8 @@ floating IP's name.
   private network, for example `http://10.0.50.11:8096` and
   `http://10.0.50.12:8096`. Replica requests are signed with a key that
   Deadfin keeps in the database.
-- **Data root: share one between the replicas** (#26). It holds the
+- **Data root: share one between the replicas**
+  ([maintainer's answer on #26](https://github.com/deadfin-org/deadfin/issues/26#issuecomment-6744198633)). It holds the
   settings (`config/*.xml`), the library folders (`root/default`),
   collections, playlists, trickplay and local images (`metadata`). A
   separate data root per replica is **not safe**: a replica that reads the
@@ -205,7 +206,8 @@ floating IP's name.
   - Keep `log/` on each host's local disk. Both replicas name their log
     files the same way.
 
-  Two limits in v0.4.0:
+  Two limits in v0.4.0 (see the
+  [#26 answer](https://github.com/deadfin-org/deadfin/issues/26#issuecomment-6744198633)):
 
   - **Settings reach the other replica only when it restarts.** Each
     replica reads the settings files once, at start, and a later save on
@@ -216,10 +218,11 @@ floating IP's name.
   - **Both replicas run the scheduled tasks** (library scan every 12 hours,
     metadata refresh, trickplay, cleanup), and the schedule is shared, so
     they can't be staggered. Start a manual scan on one replica only.
-- **Transcode directory:** share it between the replicas, so a remote HLS
-  job moves to the other replica without restarting. We use an NFS export
-  on SSD, read-write for both hosts and owned by the container user
-  (65532).
+- **Transcode directory:** `cache/transcodes` is inside the shared data
+  root, so both replicas already share it, and a remote HLS job moves to
+  the other replica without restarting. Optionally, put the cache on its own
+  export, as we do: SSD, no snapshots, sync off, owned by the container user
+  (65532), mounted on `cache`.
 
   "Remote" means the job runs on a
   [transcode worker](../transcode-workers.md). With no worker, each
@@ -230,11 +233,7 @@ floating IP's name.
   one worker that isn't on either replica host, point it at the floating
   IP's name, and set `DEADFIN_TRANSCODE_WORKER_MODE=workers-first`.
 
-  ⚠️ Mount the share on the **`cache`** directory, not on
-  `cache/transcodes`. Deadfin deletes and recreates `cache/transcodes` at
-  start, which fails on a mount point
-  (`unlinkat …/cache/transcodes: device or resource busy`) and the
-  container restarts in a loop.
+  If you use a separate export, mount it on `cache`, not on `cache/transcodes`: in v0.4.0-rc.1 a mount point there fails at start (`device or resource busy`).
 
   ```yaml
   services:
